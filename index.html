@@ -114,7 +114,7 @@ button.small { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radi
 .steps li { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--surface-2); }
 .steps p { margin: 6px 0 8px; color: var(--muted); font-size: 13px; }
 .steps .row button { flex: 1; }
-.res { font: 12px/1.45 var(--mono); margin-top: 6px; word-break: break-word; }
+.res { font: 12px/1.45 var(--mono); margin-top: 6px; word-break: break-word; white-space: pre-wrap; }
 .res:empty { display: none; }
 .stchip { font: 600 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; padding: 5px 8px; border-radius: 999px; background: var(--surface); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
 .stchip.ok { color: var(--ok); } .stchip.fail { color: var(--bad); } .stchip.running { color: var(--accent); } .stchip.skip { color: var(--warn); }
@@ -554,9 +554,9 @@ const DEFAULTS = {
   maxSpeed: 15, maxBg: 0.5, maxBa: 3,
   reintBg: 0.003, reintBa: 0.05,
   depthRel: 0.3, td: 0, maxMapPts: 40000,
-  da3ScaleSigma: 3,
-  initV: 1.0, initBgSigma: 0.02, initBg: null,
-  da3Inverse: 0, da3ScaleCons: 0.1, da3InitDepth: 2.0,
+  da3ScaleSigma: 3, margInflate: 1, anchorInflate: 1, anchorAbsInflate: 10,
+  initV: 1.0, initBgSigma: 0.02, initBaSigma: 0.2, initBg: null,
+  da3Inverse: 0, da3MapJitter: 0.01, da3InitDepth: 2.0,
 };
 
 class Estimator {
@@ -573,7 +573,7 @@ class Estimator {
   reset(reason) {
     this.status = this.scanning ? 'warmup' : 'idle'; this.resetReason = reason || ''; this.initWhy = '';
     this.kfs = []; this.kfById = new Map(); this.feats = new Map();
-    this.depthPriors = new Map(); this.mapScale = new Map(); this.da3 = { maps: 0, mode: '', scale: NaN, err: NaN, vote: 0, n: 0, nTri: 0, inv: null };
+    this.depthPriors = new Map(); this.mapScale = new Map(); this.marg = null; this.scaleAnchor = null; this.da3G = null; this.da3 = { maps: 0, mode: '', scale: NaN, err: NaN, vote: 0, n: 0, nTri: 0, inv: null };
     this.traj = []; this.trajById = new Map(); this.mapPts = [];
     this.pose = null; this.lastKfObs = new Map(); this.nextKf = 0;
     this.solveMs = 0; this.lastCost = 0; this.lastIters = 0; this.lastKfId = -1;
@@ -662,7 +662,7 @@ class Estimator {
     const roll = Math.atan2(a[1], a[2]), pitch = Math.atan2(-a[0], Math.hypot(a[1], a[2]));
     const R = mm(Ry(pitch), Rx(roll)), bg = (p.initBg || [0, 0, 0]).slice();
     const kf = { id: this.nextKf++, t, R, p: [0, 0, 0], v: [0, 0, 0], bg, ba: [0, 0, 0], pre: null, stat: false,
-      priorBg: bg.slice(), priorBa: [0, 0, 0], priorV: [0, 0, 0], priorVSigma: p.initV, priorBgSigma: p.initBgSigma };
+      priorBg: bg.slice(), priorBa: [0, 0, 0], priorV: [0, 0, 0], priorVSigma: p.initV, priorBgSigma: p.initBgSigma, priorBaSigma: p.initBaSigma };
     this.kfs.push(kf); this.kfById.set(kf.id, kf);
     this.addObs(kf, tracks);
     this.status = 'tracking';
@@ -733,13 +733,36 @@ class Estimator {
     const nw = this.kfs[0];
     nw.pre = null; nw.stat = false;
     nw.priorBg = nw.bg.slice(); nw.priorBa = nw.ba.slice(); nw.priorV = nw.v.slice(); nw.priorVSigma = p.priorV; nw.priorBgSigma = p.priorBg;
+    nw.priorLinv = null;
+    if (this.marg && this.marg.kfId === nw.id) {
+      const L = Float64Array.from(this.marg.cov);
+      for (let i = 0; i < 12; i++) L[i * 13] += 1e-10;
+      if (cholesky(L, 12)) { // whitening = inverse of the lower Cholesky factor
+        const Li = new Float64Array(144);
+        for (let c = 0; c < 12; c++) for (let i = c; i < 12; i++) { let a = i === c ? 1 : 0; for (let k = c; k < i; k++) a -= L[i * 12 + k] * Li[k * 12 + c]; Li[i * 12 + c] = a / L[i * 12 + i]; }
+        nw.priorLinv = Li; nw.priorR = nw.R.slice();
+      }
+    }
+    // the dying keyframe's DA3 map carried scale information: anchor the oldest remaining map
+    if (this.marg && this.marg.mapVar) {
+      let oldest = null; for (const [id] of this.mapScale) if (id !== old.id && this.kfById.has(id) && (oldest == null || this.kfById.get(id).t < this.kfById.get(oldest).t)) oldest = id;
+      const v = oldest != null ? this.marg.mapVar.get(oldest) : null;
+      if (v != null && v > 0 && (!this.scaleAnchor || this.scaleAnchor.id !== oldest)) this.scaleAnchor = { id: oldest, mean: this.mapScale.get(oldest), sigma: Math.sqrt(v) };
+    }
     for (const f of this.feats.values()) {
       if (!f.obs.has(old.id)) continue;
       if (f.lm && f.host === old.id) {
         const Xw = this.lmWorld(f, old);
         f.obs.delete(old.id);
         let ok = false;
+        const rhoOld = f.rho, varOld = f.rhoVar;
         if (f.obs.size >= 2) ok = this.setHost(f, f.obs.keys().next().value, Xw);
+        if (ok && varOld > 0) { // keep what the window knew about this landmark's depth
+          const rel = Math.max(1e-3, this.p.anchorInflate * Math.sqrt(varOld) / rhoOld);
+          // relative to the host's DA3 map scale, so anchors keep the scene's shape but not a stale metric scale
+          f.anchor = this.mapScale.has(f.host) ? { host: f.host, map: f.host, raw: f.rho / Math.exp(this.mapScale.get(f.host)), sigma: rel }
+            : { host: f.host, rho: f.rho, sigma: this.p.anchorAbsInflate * rel * f.rho };
+        }
         if (!ok) { if (f.nTot >= 3) this.pushMap(Xw); f.lm = false; f.prior = null; }
       } else f.obs.delete(old.id);
       if (f.obs.size === 0) { if (f.lm && f.nTot >= 3) this.pushMap(this.lmWorld(f)); this.feats.delete(f.id); }
@@ -806,16 +829,26 @@ class Estimator {
     // one free log-scale per relative DA3 depth map: relative depth then only fixes depth
     // ratios within a frame, never the metric scale (that stays with the IMU)
     const mapIds = [];
-    for (const f of L) if (f.prior && f.prior.map != null && !mapIds.includes(f.prior.map)) mapIds.push(f.prior.map);
-    const M = mapIds.length, n = n15 + M;
+    for (const f of L) {
+      if (f.prior && f.prior.map != null && !mapIds.includes(f.prior.map)) mapIds.push(f.prior.map);
+      if (f.anchor && f.anchor.host === f.host && f.anchor.map != null && this.mapScale.has(f.anchor.map) && !mapIds.includes(f.anchor.map)) mapIds.push(f.anchor.map);
+    }
+    const M = mapIds.length, n = n15 + M + (M ? 1 : 0), gIdx = M; // last extra variable: global DA3 log-scale
     // ---- factor list: s = state slots, d = [dof0, dof1), l = landmark idx, rob = huber
     const F = [], sig = p.sigmaPx;
     for (let i = 1; i < N; i++) {
       const pre = K[i].pre;
       if (pre && pre.Linv) F.push({ s: [i - 1, i], d: [0, 15], l: -1, rob: false, fn: st => imuResidual(pre, st[0], st[1], p) });
     }
-    { const k0 = K[0], sbg = k0.priorBgSigma || p.priorBg, sba = p.priorBa, sv = k0.priorVSigma || p.priorV;
-      F.push({ s: [0], d: [6, 15], l: -1, rob: false, fn: st => {
+    { const k0 = K[0], sbg = k0.priorBgSigma || p.priorBg, sba = k0.priorBaSigma || p.priorBa, sv = k0.priorVSigma || p.priorV;
+      const Lw = k0.priorLinv; // whitening from the covariance carried over at the last slide
+      if (Lw) F.push({ s: [0], d: [0, 15], l: -1, rob: false, fn: st => {
+        const s = st[0], r = new Array(12);
+        const e = [...logSO3(mtm(k0.priorR, s.R)), ...sub3(s.v, k0.priorV), ...sub3(s.bg, k0.priorBg), ...sub3(s.ba, k0.priorBa)];
+        for (let i = 0; i < 12; i++) { let a = 0; for (let k = 0; k <= i; k++) a += Lw[i * 12 + k] * e[k]; r[i] = a; }
+        return r;
+      } });
+      else F.push({ s: [0], d: [6, 15], l: -1, rob: false, fn: st => {
         const s = st[0], r = new Array(9);
         for (let i = 0; i < 3; i++) { r[i] = (s.v[i] - k0.priorV[i]) / sv; r[3 + i] = (s.bg[i] - k0.priorBg[i]) / sbg; r[6 + i] = (s.ba[i] - k0.priorBa[i]) / sba; }
         return r;
@@ -839,6 +872,11 @@ class Estimator {
         const ts = slot.get(kid); if (ts === undefined) continue;
         F.push({ s: [hs, ts], d: [0, 6], l: li, rob: true, fn: (st, r) => reprojResidual(st[0], st[1], b, r, o, cam, sig) });
       }
+      if (f.anchor && f.anchor.host === f.host) {
+        const an = f.anchor, k = an.map != null ? mapIds.indexOf(an.map) : -1;
+        if (k >= 0) F.push({ s: [], d: [0, 0], l: li, x: [k], rob: false, fn: (st, r, xv) => [(Math.log(Math.max(r, 1e-6)) - Math.log(an.raw) - xv[0]) / an.sigma] });
+        else if (an.rho) F.push({ s: [], d: [0, 0], l: li, rob: false, fn: (st, r) => [(r - an.rho) / an.sigma] });
+      }
       if (f.prior) {
         const pr = f.prior;
         if (pr.map != null) F.push({ s: [], d: [0, 0], l: li, x: [mapIds.indexOf(pr.map)], rob: false, fn: (st, r, xv) => [(Math.log(Math.max(r, 1e-6)) - Math.log(pr.rho) - xv[0]) / pr.sigma] });
@@ -846,12 +884,14 @@ class Estimator {
       }
     });
 
-    { // scale of each DA3 map: soft tie to the previous map, very weak absolute anchor
-      const order = mapIds.map((id, k) => [this.kfById.get(id).t, k]).sort((a, b) => a[0] - b[0]).map(e => e[1]);
-      order.forEach((k, i) => {
-        const s0 = this.mapScale.get(mapIds[k]) || 0;
-        F.push({ s: [], d: [0, 0], l: -1, x: [k], rob: false, fn: (st, r, xv) => [(xv[0] - s0) / p.da3ScaleSigma] });
-        if (i > 0) { const kp = order[i - 1]; F.push({ s: [], d: [0, 0], l: -1, x: [kp, k], rob: false, fn: (st, r, xv) => [(xv[1] - xv[0]) / p.da3ScaleCons] }); }
+    if (M) { // each DA3 map's scale = one persistent global scale + independent per-frame jitter
+      const g0 = this.da3G != null ? this.da3G : (this.mapScale.get(mapIds[0]) || 0);
+      F.push({ s: [], d: [0, 0], l: -1, x: [gIdx], rob: false, fn: (st, r, xv) => [(xv[0] - g0) / p.da3ScaleSigma] });
+      mapIds.forEach((id, k) => {
+        const s0 = this.mapScale.get(mapIds[k]) || 0, an = this.scaleAnchor && this.scaleAnchor.id === mapIds[k] ? this.scaleAnchor : null;
+        if (an) F.push({ s: [], d: [0, 0], l: -1, x: [k], rob: false, fn: (st, r, xv) => [(xv[0] - an.mean) / an.sigma] });
+        else F.push({ s: [], d: [0, 0], l: -1, x: [k], rob: false, fn: (st, r, xv) => [(xv[0] - s0) / p.da3ScaleSigma] });
+        F.push({ s: [], d: [0, 0], l: -1, x: [gIdx, k], rob: false, fn: (st, r, xv) => [(xv[1] - xv[0]) / p.da3MapJitter] });
       });
     }
     const hub = p.huber;
@@ -939,6 +979,29 @@ class Estimator {
       }
       return { dx, dl };
     };
+    const marginalCov = (sys, idx) => { // rows/cols idx of the inverse of the (undamped) reduced system
+      const A = Float64Array.from(sys.H);
+      for (let i = 0; i < n; i++) A[i * n + i] += 1e-9;
+      for (let l = 0; l < nL; l++) {
+        const inv = 1 / (sys.Hll[l] + 1e-12), hx = sys.Hlx[l], ti = sys.touch[l];
+        for (const i of ti) { const hi = hx[i] * inv; for (const j of ti) A[i * n + j] -= hi * hx[j]; }
+      }
+      for (let k = 3; k < 6; k++) { for (let j = 0; j < n; j++) { A[k * n + j] = 0; A[j * n + k] = 0; } A[k * n + k] = 1; }
+      if (!cholesky(A, n)) return null;
+      const Sx = new Float64Array(n * n);
+      for (let c = 0; c < n; c++) { const e = new Float64Array(n); e[c] = 1; const x = cholSolve(A, e, n); for (let r = 0; r < n; r++) Sx[r * n + c] = x[r]; }
+      const m = idx.length, C = new Float64Array(m * m);
+      idx.forEach((c, a) => idx.forEach((r, b) => { C[b * m + a] = Sx[r * n + c]; }));
+      // landmark inverse-depth marginal: 1/h + (1/h)^2 h_lx^T Sigma_x h_xl
+      const rv = new Float64Array(nL);
+      for (let l = 0; l < nL; l++) {
+        const h = sys.Hll[l] + 1e-12, hx = sys.Hlx[l], ti = sys.touch[l];
+        let q = 0; for (const i of ti) for (const j of ti) q += hx[i] * Sx[i * n + j] * hx[j];
+        rv[l] = 1 / h + q / (h * h);
+      }
+      C.rhoVar = rv;
+      return C;
+    };
     const apply = (S, dx) => S.map((s, i) => {
       const o = i * 15;
       return {
@@ -953,6 +1016,7 @@ class Estimator {
     let S = K.map(k => ({ R: k.R, p: k.p, v: k.v, bg: k.bg, ba: k.ba }));
     let rho = L.map(f => f.rho);
     let X = mapIds.map(id => this.mapScale.get(id) || 0);
+    if (M) X.push(this.da3G != null ? this.da3G : X[0]);
     let cost = totalCost(S, rho, X), lam = 1e-4, it = 0;
     const cost0 = cost;
     outer: for (; it < p.lmIters; it++) {
@@ -976,6 +1040,24 @@ class Estimator {
     K.forEach((k, i) => { const s = S[i]; k.R = orthoR(s.R); k.p = s.p; k.v = s.v; k.bg = s.bg; k.ba = s.ba; });
     L.forEach((f, i) => { f.rho = rho[i]; });
     mapIds.forEach((id, k) => this.mapScale.set(id, X[k]));
+    if (M) this.da3G = X[gIdx];
+    // marginal covariance of keyframe 1's [v, bg, ba] and of every map scale, read from the
+    // final normal equations. When keyframe 0 slides out these become the new priors, so the
+    // window keeps what it knew instead of restarting from fixed sigmas.
+    if (N >= 2) {
+      const sysF = linearize(S, rho, X), idx = [];
+      for (let k = 0; k < 3; k++) idx.push(15 + k);
+      for (let k = 6; k < 15; k++) idx.push(15 + k);
+      for (let k = 0; k < M; k++) idx.push(n15 + k);
+      const C = marginalCov(sysF, idx);
+      if (C) {
+        const m = idx.length, cov = new Float64Array(144);
+        for (let i = 0; i < 12; i++) for (let j = 0; j < 12; j++) cov[i * 12 + j] = C[i * m + j] * p.margInflate;
+        const mapVar = new Map(); for (let k = 0; k < M; k++) mapVar.set(mapIds[k], C[(12 + k) * m + 12 + k] * p.margInflate);
+        this.marg = { kfId: K[1].id, cov, mapVar };
+        L.forEach((f, i) => { f.rhoVar = C.rhoVar[i]; });
+      }
+    }
     this.lastCost = cost; this.firstCost = cost0; this.lastIters = it; this.nFactors = F.length; this.nLm = nL;
   }
 
@@ -1070,7 +1152,7 @@ class Estimator {
       let cov = 0; for (let i = 0; i < ld.length; i++) cov += (ld[i] - md) * (lz[i] - mz);
       D.vote += Math.sign(cov) * (D.inv ? -1 : 1);
       if (D.vote <= -3) { // wrong assumption: flip and drop the priors built on it
-        D.inv = !D.inv; D.vote = 0; this.depthPriors.clear(); this.mapScale.clear();
+        D.inv = !D.inv; D.vote = 0; this.depthPriors.clear(); this.mapScale.clear(); this.da3G = null;
         for (const f of this.feats.values()) f.prior = null;
       }
     }
@@ -1079,8 +1161,7 @@ class Estimator {
     let s0;
     if (pairs.length >= 5) s0 = Math.log(median(pairs.map(([d, Z]) => (1 / Z) / rho0(d))));
     else {
-      let newest = null; for (const [id] of this.depthPriors) if (this.kfById.has(id) && (newest == null || this.kfById.get(id).t > this.kfById.get(newest).t)) newest = id;
-      s0 = newest != null ? this.mapScale.get(newest) || 0 : Math.log((1 / p.da3InitDepth) / median(all.map(([, d]) => rho0(d))));
+      s0 = this.da3G != null ? this.da3G : Math.log((1 / p.da3InitDepth) / median(all.map(([, d]) => rho0(d))));
     }
     const m = new Map();
     for (const [f, d] of all) m.set(f.id, rho0(d));
@@ -1090,11 +1171,8 @@ class Estimator {
     Object.assign(D, { maps: D.maps + 1, mode: D.inv ? 'inverse depth' : 'depth', scale: Math.exp(-s0), err, n: all.length, nTri: pairs.length });
     return { ok: true, n: all.length, nTri: pairs.length, err, scale: Math.exp(-s0) };
   }
-  // metres per unit of raw DA3 depth for the newest map (as solved by the window)
-  da3Scale() {
-    let newest = null; for (const [id] of this.mapScale) if (this.kfById.has(id) && (newest == null || this.kfById.get(id).t > this.kfById.get(newest).t)) newest = id;
-    return newest == null ? NaN : Math.exp(-this.mapScale.get(newest));
-  }
+  // metres per unit of raw DA3 depth (global scale as solved by the window)
+  da3Scale() { return this.da3G == null ? NaN : Math.exp(-this.da3G); }
 }
 
 // ======================================================================
@@ -1380,7 +1458,7 @@ const SCHEMA = [
   ['da3Size', 'DA3 input size (px, multiple of 14)', 'Depth prior', 504, 14, 'app'],
   ['da3Fit', 'DA3 input fit: square (centre crop) | aspect', 'Depth prior', 'square', 0, 'app'],
   ['da3Inverse', 'DA3 output is inverse depth (0 = depth; auto-corrected)', 'Depth prior', 0, 1, 'est'],
-  ['da3ScaleCons', 'DA3 map-to-map scale tie (log σ)', 'Depth prior', D.da3ScaleCons, 0.01, 'est'],
+  ['da3MapJitter', 'DA3 per-frame scale jitter (log σ)', 'Depth prior', D.da3MapJitter, 0.01, 'est'],
   ['da3Budget', 'Benchmark: max ms per DA3 run to auto-select', 'Depth prior', 500, 50, 'app'],
 ];
 const DEF = Object.fromEntries(SCHEMA.map(s => [s[0], s[3]]));
@@ -1528,6 +1606,7 @@ function syncButtons() {
 }
 async function start(permP) {
   if (S.mode !== 'idle') return;
+  S.startError = '';
   try {
     if (permP) { const r = await permP.catch(e => 'error: ' + e.message); if (r !== 'granted') diagnose(`DeviceMotionEvent.requestPermission → ${r}`); }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('getUserMedia unavailable (needs HTTPS or localhost)');
@@ -1545,6 +1624,7 @@ async function start(permP) {
     if (!S.scanning) setHint('Camera on. Tap Start scan when you are ready.');
   } catch (e) {
     stop();
+    S.startError = `${e.name || 'Error'}: ${e.message}`;
     setHint(`Could not start: ${e.name || ''} ${e.message}`, 'bad');
     diagnose(`Start failed: ${e.name || ''} ${e.message}`);
   }
@@ -2073,9 +2153,21 @@ $('ss_sensors').addEventListener('click', () => {
   const permP = (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') ? DeviceMotionEvent.requestPermission() : null;
   stepState('sensors', 'running', 'starting camera and sensors…');
   (S.mode === 'idle' ? start(permP) : Promise.resolve()).then(async () => {
-    await sleep(3500);
-    const ok = S.mode !== 'idle' && S.imuRate > 50 && S.fps > 5;
-    stepState('sensors', ok ? 'ok' : 'fail', `camera ${video.videoWidth}×${video.videoHeight} @ ${S.fps.toFixed(0)} fps · IMU ${S.imuRate.toFixed(0)} Hz (${S.imuSrc})` + (ok ? '' : ' — see diagnostics at the bottom'));
+    // poll for up to 6 s so a slow camera or sensor start isn't reported as a failure
+    let camOk = false, imuOk = false;
+    for (let i = 0; i < 24 && !(camOk && imuOk); i++) {
+      await sleep(250);
+      camOk = S.mode !== 'idle' && video.videoWidth > 0 && S.frames > 10;
+      imuOk = S.imuCount > 60 && S.imuRate >= 30;
+      if (S.mode === 'idle') break;
+    }
+    const cam = S.mode === 'idle' ? `camera ✗ ${S.startError || 'did not start'}`
+      : camOk ? `camera ✓ ${video.videoWidth}×${video.videoHeight} @ ${S.fps.toFixed(0)} fps` : `camera ✗ no frames (${S.frames} so far)`;
+    const imu = imuOk ? `IMU ✓ ${S.imuRate.toFixed(0)} Hz via ${S.imuSrc}`
+      : S.imuCount === 0 ? `IMU ✗ no readings (source: ${S.imuSrc})` : `IMU ✗ only ${S.imuRate.toFixed(0)} Hz via ${S.imuSrc} (need ≥ 30)`;
+    let diag = '';
+    if (!(camOk && imuOk)) { await diagnose('Sensor check:'); diag = '\n' + $('diag').textContent; }
+    stepState('sensors', camOk && imuOk ? 'ok' : 'fail', `${cam}\n${imu}${diag}`);
   });
 });
 $('ss_da3').addEventListener('click', async () => {

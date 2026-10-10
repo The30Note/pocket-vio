@@ -50,6 +50,13 @@ function testKLT() {
 // ------------------------------------------------------------ trajectory
 const env = u => u <= 0 ? 0 : u * u / (u * u + 1);
 const R0 = [1, 0, 0, 0, 0, -1, 0, 1, 0]; // portrait, back camera looking at world +y
+function makeTremor() { // phone held still by hand: mm-level shake, sub-degree wobble, slow sway
+  const pos = t => [0.002 * Math.sin(2 * Math.PI * 4.1 * t) + 0.004 * Math.sin(0.7 * t), 0.002 * Math.sin(2 * Math.PI * 5.3 * t + 1) + 0.003 * Math.sin(0.5 * t + 2), 0.0015 * Math.sin(2 * Math.PI * 6.7 * t + 2) + 0.003 * Math.sin(0.4 * t)];
+  const rot = t => mm(expSO3([0.004 * Math.sin(2 * Math.PI * 4.7 * t) + 0.01 * Math.sin(0.3 * t), 0.004 * Math.sin(2 * Math.PI * 5.9 * t + 1) + 0.01 * Math.sin(0.25 * t + 1), 0.003 * Math.sin(2 * Math.PI * 3.9 * t + 2)]), R0);
+  const h = 1e-4;
+  return { pos, rot, acc: t => scl3(add3(sub3(pos(t + h), scl3(pos(t), 2)), pos(t - h)), 1 / (h * h)), vel: t => scl3(sub3(pos(t + h), pos(t - h)), 0.5 / h),
+    omega: t => scl3(logSO3(mtm(rot(t - h), rot(t + h))), 0.5 / h) };
+}
 function makeMotion(tStatic, amp = 1) {
   const pos = t => { const u = t - tStatic, e = env(u) * amp;
     return [e * 0.9 * Math.sin(0.55 * u), e * (0.5 * Math.sin(0.8 * u) + 0.15 * Math.sin(2.1 * u)), e * 0.25 * Math.sin(0.9 * u + 0.3 * Math.sin(1.7 * u))]; };
@@ -82,8 +89,8 @@ function inv3(A) {
 }
 
 // ------------------------------------------------------------ VIO test
-function testVIO({ seconds = 30, seed = 1, da3Out = 'depth', da3Lat = 0.25, td = 0, label = 'VIO', scanAt = 0, initBgErr = null, params = {} } = {}) {
-  const R = rng(seed), tStatic = 2.0, mo = makeMotion(tStatic);
+function testVIO({ seconds = 30, seed = 1, da3Out = 'depth', da3Lat = 0.25, td = 0, label = 'VIO', scanAt = 0, initBgErr = null, params = {}, motion = 'walk' } = {}) {
+  const R = rng(seed), tStatic = 2.0, mo = motion === 'still' ? makeTremor() : makeMotion(tStatic);
   const W = 270, H = 360, cam = makeCam(W, H, 65, 0);
   const bgT = [0.012, -0.018, 0.009], baT = [0.06, -0.08, 0.1];
   const est = new VIO.Estimator({ td });
@@ -116,7 +123,7 @@ function testVIO({ seconds = 30, seed = 1, da3Out = 'depth', da3Lat = 0.25, td =
   const project = (X, Rw, p) => { const Xc = mtv(cam.Rbc, mtv(Rw, sub3(X, p))); if (Xc[2] < 0.3) return null; const q = cam.project(Xc);
     return (q[0] < 10 || q[1] < 10 || q[0] > W - 10 || q[1] > H - 10) ? null : { q, Z: Xc[2] }; };
   const errLive = [], gtAt = t => ({ p: mo.pos(t), R: mo.rot(t) });
-  let maxSolve = 0, sumSolve = 0, nKf = 0, kills = 0, resets = 0, da3Job = null, da3Maps = 0;
+  let maxSolve = 0, sumSolve = 0, nKf = 0, kills = 0, resets = 0, da3Job = null, da3Maps = 0, maxDrift = 0, maxSpeed = 0;
   const startResets = est.resets + 1; // + startScan
   for (let k = 0; k * (1 / 30) < seconds; k++) {
     const t = k / 30, tc = t - td; // camera clock lags IMU clock by td
@@ -169,7 +176,12 @@ function testVIO({ seconds = 30, seed = 1, da3Out = 'depth', da3Lat = 0.25, td =
       }
     }
     if (da3Job && t >= da3Job.readyAt) { est.addDepthMap(da3Job.kfId, da3Job.data, da3Job.dw, da3Job.dh); da3Maps++; da3Job = null; }
-    if (est.status === 'tracking' && est.pose) errLive.push(norm3(sub3(est.pose.p, mo.pos(est.pose.t))));
+    if (process.env.TRACE && est.da3.mode !== est._lastMode) { console.log(`    [${t.toFixed(2)}] DA3 output -> ${est.da3.mode} vote=${est.da3.vote}`); est._lastMode = est.da3.mode; }
+    if (process.env.TRACE && est.kfs.length && est.kfs[est.kfs.length - 1].ba[0] - (est._lastBa || 0) > 0.03) { console.log(`    [${t.toFixed(2)}] ba_x jump ${(est._lastBa || 0).toFixed(3)} -> ${est.kfs[est.kfs.length - 1].ba[0].toFixed(3)} iters=${est.lastIters} cost ${(est.firstCost || 0).toFixed(0)}->${(est.lastCost || 0).toFixed(0)} anchor=${JSON.stringify(est.scaleAnchor)}`); }
+    if (est.kfs.length) est._lastBa = est.kfs[est.kfs.length - 1].ba[0];
+    if (process.env.TRACE && k % 60 === 0 && est.kfs.length) { const kl = est.kfs[est.kfs.length - 1];
+      console.log(`    t=${t.toFixed(1)} p=[${est.pose ? est.pose.p.map(v => v.toFixed(3)) : ''}] |v|=${est.pose ? norm3(est.pose.v).toFixed(3) : ''} ba=[${kl.ba.map(v => v.toFixed(3))}] bg=[${kl.bg.map(v => v.toFixed(4))}] m/unit=${est.da3Scale().toFixed(3)} tilt=${(Math.acos(Math.min(1, VIO.dot3(mtv(kl.R, [0, 0, 1]), mtv(mo.rot(kl.t), [0, 0, 1])))) * 180 / Math.PI).toFixed(2)} vTrue=${norm3(mo.vel(kl.t)).toFixed(3)} vEst=${norm3(kl.v).toFixed(3)} lm=${est.nLm} it=${est.lastIters} cost=${(est.lastCost || 0).toFixed(0)}`); }
+    if (est.status === 'tracking' && est.pose) { errLive.push(norm3(sub3(est.pose.p, mo.pos(est.pose.t)))); maxDrift = Math.max(maxDrift, norm3(est.pose.p)); maxSpeed = Math.max(maxSpeed, norm3(est.pose.v)); }
   }
   // ---- evaluation on the (smoothed) keyframe trajectory
   const traj = est.traj;
@@ -191,7 +203,12 @@ function testVIO({ seconds = 30, seed = 1, da3Out = 'depth', da3Lat = 0.25, td =
   console.log(`  live (IMU-propagated) error: rms ${rms(errLive).toFixed(3)} m, max ${Math.max(...errLive).toFixed(3)} m`);
   console.log(`  bias est bg=[${kfLast.bg.map(v => v.toFixed(4))}] true≈[${bgD.map(v => v.toFixed(4))}]  ba=[${kfLast.ba.map(v => v.toFixed(3))}] true≈[${baD.map(v => v.toFixed(3))}]`);
   console.log(`  DA3: ${da3Maps} maps (${est.da3.maps} used), output=${est.da3.mode}, solved ${est.da3Scale().toFixed(3)} m/unit (true ≈ 2.6), landmarks with DA3 prior ${est.da3Stats().withPrior}, DA3-initialized ${est.da3Stats().fromDA3}`);
-  check(`${label} no resets`, resets === 0 && est.resets === startResets, `resets=${resets}`);
+  if (motion === 'still') {
+    console.log(`  still: max drift ${maxDrift.toFixed(3)} m, max speed ${maxSpeed.toFixed(3)} m/s, ba=[${kfLast.ba.map(v => v.toFixed(3))}]`);
+    check(`${label} no resets`, resets === 0 && est.resets === startResets, `resets=${resets}`);
+    check(`${label} stays put (< 0.1 m over the run)`, maxDrift < 0.1 && maxSpeed < 0.3, `max drift ${maxDrift.toFixed(3)} m, max speed ${maxSpeed.toFixed(3)} m/s`);
+    return;
+  }
   check(`${label} metric scale ≈ 1`, Math.abs(al.s - 1) < 0.05, `scale=${al.s.toFixed(4)}`);
   const ate = scanAt > 0 ? ateSE3 : ateRaw, ateName = scanAt > 0 ? 'ATE (rigid-aligned)' : 'ATE raw';
   check(`${label} trajectory error small`, ate < Math.max(0.1, 0.03 * pathGT), `${ateName}=${ate.toFixed(3)} m over ${pathGT.toFixed(1)} m (${(100 * ate / pathGT).toFixed(2)}%)`);
@@ -221,6 +238,13 @@ function testCalib() {
 }
 
 const run = n => which.length === 0 || which.includes(n);
+const PX = process.env.PARAMS ? JSON.parse(process.env.PARAMS) : {};
+if (which.includes('tune')) { // quick robustness panel for parameter experiments: PARAMS='{...}'
+  const runs = [['still', { seconds: 40, seed: 21, scanAt: 1, motion: 'still', initBgErr: [0.002, -0.002, 0.002] }], ['inverse', { seconds: 20, seed: 4, da3Out: 'inverse' }],
+    ['mov3', { seconds: 25, seed: 7, scanAt: 6, initBgErr: [0.002, 0.002, -0.003] }], ['s10', { seconds: 24, seed: 10, scanAt: 10, initBgErr: [0.002, -0.003, 0.002] }],
+    ['s12', { seconds: 29, seed: 12, scanAt: 15, initBgErr: [0.002, -0.003, 0.002] }], ['s13', { seconds: 19.5, seed: 13, scanAt: 5.5, initBgErr: [0.002, -0.003, 0.002] }]];
+  for (const [l, o] of runs) testVIO({ ...o, params: PX, label: 'tune ' + l });
+}
 if (which.includes('sweep')) { // scans started at arbitrary moments (mostly mid-motion)
   for (const [seed, at] of [[8, 4], [9, 7.5], [10, 10], [11, 12.5], [12, 15], [13, 5.5]])
     testVIO({ seconds: at + 14, seed, scanAt: at, initBgErr: [0.002, -0.003, 0.002], label: `sweep seed${seed} start@${at}s` });
@@ -230,6 +254,7 @@ if (run('calib')) testCalib();
 if (run('vio')) testVIO({ seconds: opt('seconds', 30), seed: opt('seed', 1), label: 'VIO+DA3, scan from t=0 (phone at rest)' });
 if (run('td')) testVIO({ seconds: 20, seed: 2, td: 0.025, label: 'VIO+DA3 (td=25ms)' });
 if (run('inverse')) testVIO({ seconds: 20, seed: 4, da3Out: 'inverse', label: 'VIO+DA3 with inverse-depth output' });
+if (run('still')) testVIO({ seconds: 40, seed: 21, scanAt: 1, motion: 'still', initBgErr: [0.002, -0.002, 0.002], label: 'hand-held still view' });
 if (run('moving')) testVIO({ seconds: 30, seed: 5, scanAt: 8, initBgErr: [0.003, -0.002, 0.002], label: 'VIO+DA3 started while moving' });
 if (run('moving2')) testVIO({ seconds: 30, seed: 6, scanAt: 13.5, initBgErr: [-0.002, 0.003, 0.001], label: 'VIO+DA3 started while moving (2)' });
 if (run('moving3')) testVIO({ seconds: 25, seed: 7, scanAt: 6, initBgErr: [0.002, 0.002, -0.003], label: 'VIO+DA3 started while moving (3)' });
