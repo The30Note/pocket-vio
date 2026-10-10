@@ -71,7 +71,7 @@ header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: c
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); font-size: 14px; }
 .hint.warn { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
 .hint.bad { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
-.controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.controls { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
 .controls .scanbtn { grid-column: 1 / -1; min-height: 54px; font-size: 17px; }
 .controls .scanbtn.on { background: var(--bad); color: #fff; }
 .req { font: 600 10px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 3px 6px; margin-left: 4px; vertical-align: 2px; }
@@ -175,9 +175,11 @@ button.small { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radi
     <button id="bStart">Camera on</button>
     <button id="bReinit" disabled>Re-init</button>
     <button id="bCalib" disabled>Calibrate</button>
+    <button id="bPhoto" disabled>Photo</button>
     <button id="bExport">Export</button>
   </div>
   <div class="card exportbox" id="exportBox">
+    <button id="eZip" class="primary" style="grid-column: 1 / -1">Session bundle (.zip): photos + IMU + poses</button>
     <button id="eTum">Trajectory (TUM .txt)</button>
     <button id="ePly">Map points (PLY)</button>
   </div>
@@ -1689,6 +1691,120 @@ function routeBitmap(bmp, kf) {
   }
   bmp.close();
 }
+// ---------------------------------------------------------------- capture: session bundle
+// While scanning, the worker records full-resolution photos (JPEG, stored in OPFS so a crash
+// keeps them), the raw IMU stream and the poses, and can pack everything into one .zip for
+// post-processing on a desktop (see post/ in the repository).
+const cap = { on: false, id: '', dir: null, cfg: { photoDist: 0.3, photoDt: 2.0, photoMaxRate: 1.5, quality: 0.92 },
+  photos: [], mem: new Map(), imu: [], cur: null, curN: 0, frames: [], lastP: null, lastT: -Infinity, manual: false, busy: false, bytes: 0, meta: {} };
+const capPost = () => post({ type: 'capstate', on: cap.on, id: cap.id, n: cap.photos.length, bytes: cap.bytes, opfs: !!cap.dir });
+async function capStart(id) {
+  Object.assign(cap, { on: true, id, photos: [], mem: new Map(), imu: [], cur: new Float64Array(7 * 8192), curN: 0, frames: [], lastP: null, lastT: -Infinity, manual: false, busy: false, bytes: 0, dir: null });
+  try {
+    const root = await navigator.storage.getDirectory(), top = await root.getDirectoryHandle('pocketvio', { create: true });
+    const old = []; for await (const [name] of top.entries()) if (name !== id) old.push(name);
+    old.sort(); for (const name of old.slice(0, Math.max(0, old.length - 2))) await top.removeEntry(name, { recursive: true }); // keep the last 2 sessions
+    cap.dir = await top.getDirectoryHandle(id, { create: true });
+  } catch (e) { dlog('photo storage (OPFS) unavailable, keeping photos in memory: ' + e.message); }
+  capPost();
+}
+function capImu(a) {
+  if (!cap.on) return;
+  for (let i = 0; i + 6 < a.length; i += 7) {
+    if (cap.curN + 7 > cap.cur.length) { cap.imu.push(cap.cur.subarray(0, cap.curN)); cap.cur = new Float64Array(7 * 8192); cap.curN = 0; }
+    for (let k = 0; k < 7; k++) cap.cur[cap.curN + k] = a[i + k];
+    cap.curN += 7;
+  }
+}
+let pcv = null, pctx = null;
+// called for every processed frame while scanning; src = full-resolution VideoFrame/ImageBitmap
+function capFrame(t, src) {
+  if (!cap.on || !est) return;
+  const ps = est.pose, st = est.status;
+  cap.frames.push(ps ? [t, st === 'tracking' ? 1 : 0, ...ps.p, ...VIO.quatFromR(ps.R)] : [t, 0, 0, 0, 0, 0, 0, 0, 1]);
+  if (cap.busy || st !== 'tracking' || !ps || !src) return;
+  const moved = cap.lastP ? VIO.norm3(VIO.sub3(ps.p, cap.lastP)) : Infinity, dt = t - cap.lastT;
+  const s = est.imu.interp(t), rate = s ? VIO.norm3(VIO.sub3(s.w, est.bias())) : 0;
+  if (!(cap.manual || moved >= cap.cfg.photoDist || dt >= cap.cfg.photoDt)) return;
+  if (rate > cap.cfg.photoMaxRate && !cap.manual) return; // turning fast: wait for a sharper frame
+  const w = src.displayWidth || src.width, h = src.displayHeight || src.height;
+  if (!pcv || pcv.width !== w || pcv.height !== h) { pcv = new OffscreenCanvas(w, h); pctx = pcv.getContext('2d'); }
+  pctx.drawImage(src, 0, 0, w, h); // synchronous copy; the frame itself can be released right after
+  cap.busy = true; cap.manual = false; cap.lastP = ps.p.slice(); cap.lastT = t;
+  const idx = cap.photos.length, name = `img_${String(idx).padStart(5, '0')}.jpg`;
+  const rec = { name, t, w, h, p: ps.p.slice(), R: ps.R.slice(), rate };
+  pcv.convertToBlob({ type: 'image/jpeg', quality: cap.cfg.quality }).then(async blob => {
+    if (cap.dir) { const fh = await cap.dir.getFileHandle(name, { create: true }), ws = await fh.createWritable(); await ws.write(blob); await ws.close(); }
+    else cap.mem.set(name, blob);
+    rec.size = blob.size; cap.bytes += blob.size; cap.photos.push(rec); capPost();
+  }).catch(e => dlog('photo failed: ' + e.message)).finally(() => { cap.busy = false; });
+}
+// ---- export
+const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u8, c = 0xFFFFFFFF) { for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return c; }
+async function zipFiles(files) { // files: [{name, data: string|Uint8Array|Blob}] -> Blob (store, no compression)
+  const enc = new TextEncoder(), parts = [], central = [];
+  let off = 0;
+  for (const f of files) {
+    const nameB = enc.encode(f.name);
+    let data = f.data;
+    if (typeof data === 'string') data = enc.encode(data);
+    const bytes = data instanceof Blob ? new Uint8Array(await data.arrayBuffer()) : data;
+    const crc = (crc32(bytes) ^ 0xFFFFFFFF) >>> 0, n = bytes.length;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 0, true);
+    lh.setUint16(10, 0, true); lh.setUint16(12, 0x21, true); lh.setUint32(14, crc, true); lh.setUint32(18, n, true); lh.setUint32(22, n, true);
+    lh.setUint16(26, nameB.length, true); lh.setUint16(28, 0, true);
+    parts.push(lh.buffer, nameB, data instanceof Blob ? data : bytes);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true);
+    ch.setUint16(12, 0, true); ch.setUint16(14, 0x21, true); ch.setUint32(16, crc, true); ch.setUint32(20, n, true); ch.setUint32(24, n, true);
+    ch.setUint16(28, nameB.length, true); ch.setUint32(42, off, true);
+    central.push(ch.buffer, nameB);
+    off += 30 + nameB.length + n;
+  }
+  const cdSize = central.reduce((a, b) => a + b.byteLength, 0), eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true); eocd.setUint16(8, files.length, true); eocd.setUint16(10, files.length, true);
+  eocd.setUint32(12, cdSize, true); eocd.setUint32(16, off, true);
+  return new Blob([...parts, ...central, eocd.buffer], { type: 'application/zip' });
+}
+function trajPoseAt(t) { // body pose at t from the refined keyframe trajectory (linear / slerp)
+  const T = est.traj; if (!T.length) return null;
+  let i = 0; while (i < T.length - 1 && T[i + 1].t < t) i++;
+  if (t <= T[0].t || i >= T.length - 1) { const e = t <= T[0].t ? T[0] : T[T.length - 1]; return { p: e.p, R: e.R, extrap: Math.abs(t - e.t) }; }
+  const a = T[i], b = T[i + 1], u = (t - a.t) / (b.t - a.t);
+  const dR = VIO.logSO3(VIO.mtm(a.R, b.R));
+  return { p: VIO.add3(a.p, VIO.scl3(VIO.sub3(b.p, a.p), u)), R: VIO.mm(a.R, VIO.expSO3(VIO.scl3(dR, u))), extrap: 0 };
+}
+async function capExport(meta) {
+  const cam = est.cam, Rbc = cam ? cam.Rbc : VIO.I3(), f6 = v => v.toFixed(6), f9 = v => v.toPrecision(9);
+  const camPose = (R, p) => { const Rwc = VIO.mm(R, Rbc), q = VIO.quatFromR(Rwc); return [...p.map(f6), ...q.map(f9)].join(','); };
+  const files = [];
+  const ph = cap.photos.slice().sort((a, b) => a.t - b.t);
+  const w0 = ph.length ? ph[0].w : 0, h0 = ph.length ? ph[0].h : 0, k = cam && w0 ? w0 / cam.W : 1;
+  const camera = cam ? { model: 'PINHOLE', width: w0, height: h0, fx: cam.f * k, fy: cam.f * k, cx: cam.cx * k, cy: cam.cy * k,
+    fov_long_side_deg: cam.fov, R_body_cam_rowmajor: Rbc, theta_deg: cam.theta, td_s: est.p.td, tracking_size: [cam.W, cam.H] } : null;
+  const rows = ['name,t,status,live_px,live_py,live_pz,live_qx,live_qy,live_qz,live_qw,kf_px,kf_py,kf_pz,kf_qx,kf_qy,kf_qz,kf_qw,kf_extrap_s,gyro_rate'];
+  for (const r of ph) { const kf = trajPoseAt(r.t); rows.push([r.name, f6(r.t), 'tracking', camPose(r.R, r.p), kf ? camPose(kf.R, kf.p) : ',,,,,,', kf ? kf.extrap.toFixed(3) : '', r.rate.toFixed(3)].join(',')); }
+  files.push({ name: 'photos.csv', data: rows.join('\n') + '\n' });
+  const imu = [...cap.imu, cap.cur.subarray(0, cap.curN)], lines = ['t,gx,gy,gz,ax,ay,az'];
+  for (const c of imu) for (let i = 0; i < c.length; i += 7) lines.push(`${c[i].toFixed(6)},${c[i + 1].toPrecision(7)},${c[i + 2].toPrecision(7)},${c[i + 3].toPrecision(7)},${c[i + 4].toPrecision(7)},${c[i + 5].toPrecision(7)},${c[i + 6].toPrecision(7)}`);
+  files.push({ name: 'imu.csv', data: lines.join('\n') + '\n' });
+  files.push({ name: 'frames.csv', data: 't,tracking,px,py,pz,qx,qy,qz,qw\n' + cap.frames.map(r => [r[0].toFixed(6), r[1], ...r.slice(2, 5).map(f6), ...r.slice(5).map(f9)].join(',')).join('\n') + '\n' });
+  files.push({ name: 'keyframes_tum.txt', data: '# t x y z qx qy qz qw  (IMU body in world, z up)\n' + est.traj.map(e => [e.t.toFixed(6), ...e.p.map(f6), ...VIO.quatFromR(e.R).map(f9)].join(' ')).join('\n') + '\n' });
+  files.push({ name: 'camera.json', data: JSON.stringify(camera, null, 1) });
+  files.push({ name: 'session.json', data: JSON.stringify({ app: 'pocket-vio', format: 1, id: cap.id, photos: ph.length, imuSamples: lines.length - 1, frames: cap.frames.length,
+    conventions: { world: 'gravity-aligned, z up, initial yaw arbitrary; metres as estimated on the phone', camera: 'OpenCV (x right, y down, z forward); photo poses are camera-to-world',
+      time: 'seconds on the page performance.now() clock (IMU and camera mapped onto it)', imu: 'device frame; gyro rad/s; accel m/s^2 including gravity (+9.81 up at rest)' },
+    estimator: { initBg: est.p.initBg || null, lastBg: est.kfs.length ? est.kfs[est.kfs.length - 1].bg : null, lastBa: est.kfs.length ? est.kfs[est.kfs.length - 1].ba : null, da3MetresPerUnit: est.da3Scale(), path_m: est.pathLength() },
+    ...meta }, null, 1) });
+  for (const r of ph) {
+    let blob = cap.mem.get(r.name);
+    if (!blob && cap.dir) { try { blob = await (await cap.dir.getFileHandle(r.name)).getFile(); } catch (e) { dlog('missing photo ' + r.name); } }
+    if (blob) files.push({ name: 'images/' + r.name, data: blob });
+  }
+  return zipFiles(files.map(f => ({ ...f, name: `pocketvio_${cap.id}/${f.name}` })));
+}
 let oc = null, octx = null;
 function toGray(fr) {
   if (fr.gray) return;
@@ -1720,6 +1836,7 @@ function processFrame(fr) {
   const T = new Float32Array(4 * trk.pts.length);
   trk.pts.forEach((q, i) => { const f = est.feats.get(q.id); T[4 * i] = q.id; T[4 * i + 1] = q.x; T[4 * i + 2] = q.y; T[4 * i + 3] = f && f.lm ? (f.prior ? 2 : 1) : 0; });
   post({ type: 'frame', seq: fr.seq, t: fr.t, tracks: T, kltMs, kf: kf ? { id: kf.id } : null, solveMs: kf ? est.solveMs : null, reset: r && r.reset, state: light() }, [T.buffer]);
+  if (mode === 'running' && est.scanning) capFrame(fr.t + est.p.td, fr.bmp);
   if (mode === 'running') routeBitmap(fr.bmp, kf); else if (da3.waiters.length) da3.waiters.shift()(fr.bmp); else fr.bmp.close();
   snapshot(!!kf);
 }
@@ -1730,7 +1847,7 @@ self.onmessage = e => {
     case 'params': Object.assign(est.p, m.params); break;
     case 'trkParams': Object.assign(trk.p, m.params); if (m.reset) { trk.reset(); prevT = null; } break;
     case 'camera': est.setCamera(VIO.makeCam(m.W, m.H, m.fov, m.theta)); break;
-    case 'imu': { const a = m.s; for (let i = 0; i + 6 < a.length; i += 7) est.addImu(a[i], [a[i + 1], a[i + 2], a[i + 3]], [a[i + 4], a[i + 5], a[i + 6]]); pump(); break; }
+    case 'imu': { const a = m.s; for (let i = 0; i + 6 < a.length; i += 7) est.addImu(a[i], [a[i + 1], a[i + 2], a[i + 3]], [a[i + 4], a[i + 5], a[i + 6]]); capImu(a); pump(); break; }
     case 'frame':
       m.arr = performance.now(); queue.push(m);
       while (queue.length > 3) { const d = queue.shift(); if (d.bmp) d.bmp.close(); post({ type: 'dropped', seq: d.seq }); }
@@ -1749,6 +1866,11 @@ self.onmessage = e => {
     case 'da3cfg': Object.assign(da3.cfg, m.cfg); if (m.reload && !da3.loading) loadDA3(); break;
     case 'da3load': (async () => { if (!da3.loading && !da3.ready) await loadDA3(); else while (da3.loading) await new Promise(r => setTimeout(r, 200)); post({ type: 'da3loaded', id: m.id }); })(); break;
     case 'da3bench': benchmarkDA3(m.id); break;
+    case 'capStart': capStart(m.capId); break;
+    case 'capStop': cap.on = false; capPost(); break;
+    case 'capCfg': Object.assign(cap.cfg, m.cfg); break;
+    case 'capPhoto': cap.manual = true; break;
+    case 'capExport': capExport(m.meta).then(blob => post({ type: 'capExport', id: m.id, blob })).catch(e => post({ type: 'capExport', id: m.id, error: e.message })); break;
     case 'export': post({ type: 'export', id: m.id, traj: est.traj.map(e => ({ t: e.t, p: e.p, R: e.R })), pts: est.mapPts.concat(est.windowLandmarks()) }); break;
   }
 };
@@ -1765,7 +1887,12 @@ const D = VIO.DEFAULTS;
 // ------------------------------------------------------------------ settings
 // [key, label, group, default, step, target]  target: est | trk | app | cam
 const SCHEMA = [
+  ['camW', 'Camera stream width (px; photos use it)', 'Camera', 1280, 160, 'app'],
+  ['camH', 'Camera stream height (px)', 'Camera', 960, 120, 'app'],
   ['procSize', 'Processing long side (px)', 'Camera', 360, 10, 'cam'],
+  ['photoDist', 'Photo every … metres of travel', 'Capture', 0.3, 0.05, 'cap'],
+  ['photoDt', 'Photo at least every … s', 'Capture', 2.0, 0.1, 'cap'],
+  ['photoMaxRate', 'Skip photos while turning faster than (rad/s)', 'Capture', 1.5, 0.1, 'cap'],
   ['fov', 'FOV, long side (°)', 'Camera', 66, 0.1, 'cam'],
   ['td', 'Camera→IMU time offset td (ms)', 'Camera', 0, 1, 'est'],
   ['camOffset', 'In-plane camera rotation offset (°)', 'Camera', 0, 90, 'cam'],
@@ -1871,6 +1998,7 @@ W_.onmessage = e => {
     if (m.mapNew.length) est.mapPts = est.mapPts.concat(unflat(m.mapNew));
   } else if (m.type === 'dropped') S.inflight.delete(m.seq);
   else if (m.type === 'error') { S.inflight.delete(m.seq); setHint('Internal error, re-initialized: ' + m.message, 'bad'); }
+  else if (m.type === 'capstate') S.cap = m;
   else if (m.type === 'da3status') onDa3Status(m);
   else if (m.type === 'da3log') dlog(m.msg);
   else if (m.type === 'inset') onDa3Inset(m);
@@ -2027,19 +2155,19 @@ async function beginScan(permP) {
   }
   if (S.mode === 'idle') { await start(permP); if (S.mode === 'idle') return; }
   if (S.mode !== 'running') { setHint('Finish calibration first.', 'warn'); return; }
-  S.scanning = true; W_.postMessage({ type: 'startScan' }); sendDa3Cfg(false); S.est.status = 'warmup'; S.prevT = null; S.prevTracks = null; S.lastReset = '';
+  S.scanning = true; W_.postMessage({ type: 'startScan' }); W_.postMessage({ type: 'capStart', capId: stamp() }); sendDa3Cfg(false); S.est.status = 'warmup'; S.prevT = null; S.prevTracks = null; S.lastReset = '';
   syncButtons(); setHint('Scan started — point at a textured scene and move normally.');
 }
 function endScan() {
-  S.scanning = false; W_.postMessage({ type: 'stopScan' }); S.est.status = 'idle'; sendDa3Cfg(false); syncButtons();
-  setHint(`Scan ended · ${S.est.pathLength().toFixed(2)} m path · ${S.est.traj.length} keyframes. Export is available.`);
+  S.scanning = false; W_.postMessage({ type: 'stopScan' }); W_.postMessage({ type: 'capStop' }); S.est.status = 'idle'; sendDa3Cfg(false); syncButtons();
+  setHint(`Scan ended · ${S.est.pathLength().toFixed(2)} m path · ${S.cap.n} photos. Export → Session bundle for post-processing.`);
 }
 function syncButtons() {
   const on = S.mode !== 'idle';
   $('bStart').textContent = on ? 'Camera off' : 'Camera on';
   $('bScan').textContent = S.scanning ? 'End scan' : 'Start scan';
   $('bScan').classList.toggle('on', S.scanning);
-  $('bReinit').disabled = !S.scanning;
+  $('bReinit').disabled = !S.scanning; $('bPhoto').disabled = !S.scanning;
   $('bCalib').disabled = !on || S.scanning;
 }
 async function start(permP) {
@@ -2050,7 +2178,7 @@ async function start(permP) {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('getUserMedia unavailable (needs HTTPS or localhost)');
     S.mode = 'running'; sendMode(true);
     startSensors();
-    S.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: 640, height: 480, frameRate: 30 } });
+    S.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: SET.camW, height: SET.camH, frameRate: 30 } });
     video.srcObject = S.stream;
     await video.play();
     $('camEmpty').style.display = 'none';
@@ -2068,7 +2196,7 @@ async function start(permP) {
   }
 }
 function stop() {
-  if (S.scanning) { S.scanning = false; W_.postMessage({ type: 'stopScan' }); S.est.status = 'idle'; }
+  if (S.scanning) { S.scanning = false; W_.postMessage({ type: 'stopScan' }); W_.postMessage({ type: 'capStop' }); S.est.status = 'idle'; }
   S.mode = 'idle'; S.calib = null; sendMode(true);
   stopSensors();
   if (S.stream) { for (const t of S.stream.getTracks()) t.stop(); S.stream = null; }
@@ -2187,6 +2315,20 @@ function dlog(msg) {
   const el = $('da3Log'); el.textContent = da3Log.slice(-14).join('\n'); el.style.display = 'block';
 }
 function da3Cfg() { return { model: SET.da3Model, file: SET.da3File, backend: SET.da3Backend, size: SET.da3Size, fit: SET.da3Fit, scanning: S.scanning }; }
+const sendCapCfg = () => W_.postMessage({ type: 'capCfg', cfg: { photoDist: SET.photoDist, photoDt: SET.photoDt, photoMaxRate: SET.photoMaxRate } });
+sendCapCfg();
+S.cap = { on: false, n: 0, bytes: 0, id: '' };
+$('bPhoto').addEventListener('click', () => { if (S.scanning) { W_.postMessage({ type: 'capPhoto' }); setHint('Photo queued (taken on the next sharp frame).'); } });
+$('eZip').addEventListener('click', async () => {
+  if (!S.cap.n) { setHint('No photos recorded yet — they are taken automatically during a scan.', 'warn'); return; }
+  setHint(`Packing ${S.cap.n} photos (${(S.cap.bytes / 1048576).toFixed(0)} MB)…`, '', false); hintUntil = performance.now() + 60000;
+  const r = await request({ type: 'capExport', meta: { exported: new Date().toISOString(), ua: navigator.userAgent, clocks: { imu: S.clk.imu.describe(), camera: S.clk.cam.describe() },
+    calibration: { fov: SET.fov, td_ms: SET.td, offset_deg: SET.camOffset, last: S.lastCalib || null }, imuRestCheck: S.imuCheck || null, walks: S.walks, settings: SET } });
+  hintUntil = 0;
+  if (r.error) { setHint('Export failed: ' + r.error, 'bad'); return; }
+  download(`pocketvio_${S.cap.id}.zip`, r.blob, 'application/zip');
+  setHint(`Session bundle ready (${(r.blob.size / 1048576).toFixed(0)} MB). Process it on your desktop with post/pvpost.py.`);
+});
 const sendDa3Cfg = reload => W_.postMessage({ type: 'da3cfg', cfg: da3Cfg(), reload: !!reload });
 sendDa3Cfg(false);
 function onDa3Status(m) {
@@ -2514,6 +2656,7 @@ const RO = [
   ['IMU rate', () => `${f2(S.imuRate, 0)} Hz · ${S.imuSrc}`],
   ['clocks', () => `IMU ${S.clk.imu.describe()} · camera ${S.clk.cam.describe()}`, true],
   ['tracks', () => String(S.lastTracks.length)],
+  ['photos', () => S.cap.n ? `${S.cap.n} · ${(S.cap.bytes / 1048576).toFixed(1)} MB${S.cap.opfs ? '' : ' (memory)'}` : '–'],
   ['landmarks', () => `${S.est.nLm || 0} win · ${S.est.mapPts.length} map`],
   ['keyframes', () => `${S.est.kfs.length} win · ${S.est.nTraj || S.est.traj.length} total`],
   ['solve', () => `${f2(S.est.solveMs, 0)} ms · ${S.est.lastIters || 0} it`],
@@ -2585,6 +2728,8 @@ function applySetting(sc) {
   else if (to === 'cam') { if (k === 'procSize') S.proc = null; else updateCamera(); if (S.mode === 'running') reinit('camera setting changed'); }
   else if (k === 'imuFreq' && S.mode !== 'idle') { stopSensors(); startSensors(); }
   else if (k === 'usePredict') sendMode(false);
+  else if (to === 'cap') sendCapCfg();
+  else if ((k === 'camW' || k === 'camH') && S.mode !== 'idle') setHint('Camera resolution applies the next time the camera starts. Re-run Calibrate afterwards.', 'warn');
   else if (k.startsWith('da3')) sendDa3Cfg(['da3Model', 'da3File', 'da3Backend'].includes(k) && (S.da3.ready || S.da3.loading));
 }
 $('sDefaults').addEventListener('click', () => {
