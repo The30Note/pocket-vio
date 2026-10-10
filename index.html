@@ -55,8 +55,9 @@ header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: c
 .chip.tracking::before, .chip.warmup::before, .chip.calibrating::before { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .3; } }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
-.cam { position: relative; display: grid; place-items: center; background: #000; }
-#view { display: block; width: 100%; max-height: 46vh; aspect-ratio: 3 / 4; object-fit: contain; }
+.cam { position: relative; background: #000; }
+.camframe { position: relative; margin: 0 auto; width: 100%; max-width: calc(46vh * var(--cam-aspect, 0.75)); aspect-ratio: var(--cam-aspect, 0.75); }
+#view { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .cam .legend { position: absolute; left: 10px; bottom: 10px; display: flex; gap: 10px; font: 500 11px/1 var(--mono);
   color: #fff; background: rgba(0,0,0,.45); padding: 6px 8px; border-radius: 8px; }
 .cam .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
@@ -65,7 +66,7 @@ header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: c
 .depthwrap canvas { display: block; width: 100%; height: auto; }
 .depthwrap span { position: absolute; left: 0; right: 0; bottom: 0; font: 500 10px/1.4 var(--mono); color: #fff; background: rgba(0,0,0,.55); padding: 2px 5px; }
 .depthwrap em { font-style: normal; opacity: .8; }
-#video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+#video { display: block; width: 100%; height: 100%; object-fit: fill; background: #000; }
 .hint { border-radius: var(--radius); padding: 10px 14px; background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); font-size: 14px; }
 .hint.warn { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
@@ -163,11 +164,10 @@ button.small { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radi
     <div class="row setup-foot"><button id="setupCopy">Copy report</button><button id="setupFinish" class="primary">Finish</button></div>
   </section>
   <section class="card cam">
-    <canvas id="view" width="270" height="360"></canvas>
+    <div class="camframe"><video id="video" playsinline muted autoplay></video><canvas id="view" width="270" height="360"></canvas></div>
     <div class="empty" id="camEmpty">Back camera preview appears here</div>
     <div class="legend"><span><i style="background:var(--lm)"></i>landmark</span><span><i style="background:var(--da3)"></i>DA3 prior</span><span><i style="background:var(--warn)"></i>track</span></div>
     <div class="depthwrap" id="depthWrap"><canvas id="depthInset"></canvas><span>DA3 <em id="depthRange"></em></span></div>
-    <video id="video" playsinline muted autoplay></video>
   </section>
   <div id="hint" class="hint">Nothing records until you tap <b>Start scan</b>. Turn the camera on first if you want to line up the shot.</div>
   <div class="controls">
@@ -1396,6 +1396,359 @@ return { GRAV, add3, sub3, scl3, dot3, cross3, norm3, I3, mm, mtm, mmt, mv, mtv,
   median, makeCam, ImuBuf, Preint, Estimator, Tracker, buildPyramid, calibrate, DEFAULTS };
 })();
 </script>
+<script type="text/plain" id="vio-worker">
+// Pocket VIO worker: front end (KLT) + estimator off the page thread, so the page can keep
+// receiving motion-sensor events at full rate. Runs after the VIO core in the same Blob.
+let est = null, trk = null, prevT = null, mode = 'idle', usePredict = 1, lastSnap = 0, mapSent = 0, pumpTimer = 0;
+const queue = [];
+const clearQueue = () => { for (const f of queue) if (f.bmp) f.bmp.close(); queue.length = 0; }; // VideoFrames must be closed or the camera stalls
+const post = (m, tr) => self.postMessage(m, tr || []);
+function light() {
+  const k = est.kfs[est.kfs.length - 1];
+  return { status: est.status, pose: est.pose, initWhy: est.initWhy, resets: est.resets, nLm: est.nLm || 0, lastIters: est.lastIters, solveMs: est.solveMs,
+    bias: est.bias(), lastBg: k ? k.bg : null, lastBa: k ? k.ba : null, nKfs: est.kfs.length, nTraj: est.traj.length, path: est.pathLength(),
+    da3: { mode: est.da3.mode, err: est.da3.err, maps: est.da3.maps }, da3Scale: est.da3Scale(), da3Stats: est.da3Stats(), resetReason: est.resetReason };
+}
+function snapshot(force) {
+  const now = performance.now();
+  if (!force && now - lastSnap < 300) return;
+  lastSnap = now;
+  const flat = A => { const f = new Float32Array(3 * A.length); A.forEach((p, i) => { f[3 * i] = p[0]; f[3 * i + 1] = p[1]; f[3 * i + 2] = p[2]; }); return f; };
+  const traj = flat(est.traj.map(e => e.p)), kfs = flat(est.kfs.map(k => k.p)), wl = flat(est.windowLandmarks());
+  let mapReset = false;
+  if (est.mapPts.length < mapSent) { mapSent = 0; mapReset = true; }
+  const mapNew = flat(est.mapPts.slice(mapSent)); mapSent = est.mapPts.length;
+  post({ type: 'snap', traj, kfs, wl, mapNew, mapReset, state: light() }, [traj.buffer, kfs.buffer, wl.buffer, mapNew.buffer]);
+}
+function pump() {
+  clearTimeout(pumpTimer);
+  while (queue.length) {
+    const fr = queue[0];
+    // wait (max 100 ms) until IMU samples covering the frame have arrived
+    if (est.imu.lastT() < fr.t + est.p.td && performance.now() - fr.arr < 100) { pumpTimer = setTimeout(pump, 5); return; }
+    queue.shift();
+    try { processFrame(fr); }
+    catch (e) { est.reset('exception: ' + e.message); trk.reset(); prevT = null; post({ type: 'error', message: e.message, seq: fr.seq }); }
+  }
+}
+// ---------------------------------------------------------------- DA3 in the worker
+// ONNX Runtime Web (WebGPU, WASM fallback) runs here too, so the page thread only handles
+// sensors and drawing. Status, log lines and a small depth inset are posted back.
+const ORT_VER = '1.30.0', ORT_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`;
+const MODEL_CACHE = 'pocketvio-models-v1';
+const da3 = { cfg: { model: '', file: 'auto', backend: 'auto', size: 504, fit: 'square', scanning: false }, eng: null, ready: false, loading: false, busy: false,
+  status: 'not installed', runs: 0, aligned: 0, ms: 0, lastRun: 0, adapterInfo: '', waiters: [] };
+const dlog = msg => post({ type: 'da3log', msg });
+function da3post() {
+  const e = da3.eng;
+  post({ type: 'da3status', status: da3.status, ready: da3.ready, loading: da3.loading, busy: da3.busy, runs: da3.runs, aligned: da3.aligned, ms: da3.ms, adapterInfo: da3.adapterInfo,
+    eng: e ? { be: e.be, file: e.file, inName: e.inName, extra: e.extra.map(x => ({ name: x.name, kind: x.kind })), fixedW: e.fixedW } : null });
+}
+const setStatus = s => { da3.status = s; da3post(); };
+function withTimeout(p, ms, what) {
+  let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(t));
+}
+async function urlExists(url) { try { const r = await fetch(url, { method: 'HEAD' }); return r.ok; } catch (e) { return false; } }
+async function fetchCached(url, onProg) {
+  let cache = null;
+  try { cache = await caches.open(MODEL_CACHE); const hit = await cache.match(url); if (hit) { const b = new Uint8Array(await hit.arrayBuffer()); onProg(1, b.length, true); return b; } } catch (e) { cache = null; }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  const total = Number(res.headers.get('content-length')) || 0, reader = res.body.getReader(), parts = [];
+  let got = 0, lastP = 0;
+  for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length; if (performance.now() - lastP > 200) { lastP = performance.now(); onProg(total ? got / total : NaN, got, false); } }
+  const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+  if (cache) { try { await cache.put(url, new Response(buf)); } catch (e) { dlog('could not cache model: ' + e.message); } }
+  return buf;
+}
+function floatToHalf(f32) {
+  const out = new Uint16Array(f32.length), fv = new Float32Array(1), iv = new Uint32Array(fv.buffer);
+  for (let i = 0; i < f32.length; i++) { fv[0] = f32[i]; const x = iv[0], s = (x >>> 16) & 0x8000, e = ((x >>> 23) & 0xff) - 127 + 15, m = x & 0x7fffff; out[i] = e <= 0 ? s : e >= 31 ? s | 0x7c00 : s | (e << 10) | (m >>> 13); }
+  return out;
+}
+function halfToFloat(u16) {
+  const out = new Float32Array(u16.length);
+  for (let i = 0; i < u16.length; i++) { const h = u16[i], s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, m = h & 1023; out[i] = e === 0 ? s * 5.960464477539063e-8 * m : e === 31 ? (m ? NaN : s * Infinity) : s * Math.pow(2, e - 15) * (1 + m / 1024); }
+  return out;
+}
+const mb = n => (n / 1048576).toFixed(1) + ' MB';
+// next camera frame (full resolution) for the load test / benchmark; blank if the camera is off
+function nextFrame(ms) {
+  return new Promise(res => {
+    const t = setTimeout(() => { da3.waiters = da3.waiters.filter(w => w !== f); const c = new OffscreenCanvas(480, 640); c.getContext('2d').fillRect(0, 0, 480, 640); res(c.transferToImageBitmap()); }, ms);
+    const f = bmp => { clearTimeout(t); res(bmp); };
+    da3.waiters.push(f);
+  });
+}
+async function loadDA3() {
+  da3.loading = true; da3.ready = false; da3.eng = null;
+  let stage = '', t0 = performance.now();
+  const setStage = s => { stage = s; t0 = performance.now(); setStatus(s); };
+  const tick = setInterval(() => { if (stage) setStatus(`${stage} ${Math.round((performance.now() - t0) / 1000)} s`); }, 1000);
+  const C = da3.cfg;
+  try {
+    setStage('loading ONNX Runtime…');
+    const ort = await withTimeout(import(ORT_BASE + 'ort.webgpu.min.mjs'), 60000, 'ONNX Runtime import');
+    ort.env.wasm.wasmPaths = ORT_BASE;
+    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+    let adapter = null, f16 = false;
+    if (navigator.gpu) {
+      try { adapter = await withTimeout(navigator.gpu.requestAdapter(), 10000, 'WebGPU adapter'); } catch (e) { dlog(e.message); }
+      if (adapter) {
+        f16 = adapter.features.has('shader-f16');
+        const info = adapter.info || {};
+        da3.adapterInfo = `${info.vendor || '?'} ${info.architecture || ''} f16=${f16}`;
+        dlog(`WebGPU adapter (worker): ${info.vendor || '?'} ${info.architecture || ''} ${info.description || ''} · shader-f16=${f16}`);
+      } else dlog('WebGPU: no adapter in worker');
+    } else dlog('WebGPU: navigator.gpu missing in worker');
+    const backends = C.backend === 'wasm' ? ['wasm'] : C.backend === 'webgpu' ? ['webgpu'] : adapter ? ['webgpu', 'wasm'] : ['wasm'];
+    const id = C.model.trim(), direct = /^https?:\/\/.*\.onnx(\?.*)?$/.test(id);
+    const base = direct ? id.replace(/[^/]*$/, '') : /^https?:/.test(id) ? id.replace(/\/$/, '') + '/' : `https://huggingface.co/${id}/resolve/main/`;
+    let mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+    if (!direct) {
+      try { const pc = await (await withTimeout(fetch(base + 'preprocessor_config.json'), 15000, 'preprocessor config')).json();
+        if (pc.image_mean) mean = pc.image_mean; if (pc.image_std) std = pc.image_std; dlog(`preprocessor: mean=${mean} std=${std}`); }
+      catch (e) { dlog('no preprocessor_config.json, using ImageNet mean/std'); }
+    }
+    let lastErr = null;
+    for (const be of backends) {
+      const files = direct ? [id] : C.file !== 'auto' ? [base + C.file]
+        : be === 'webgpu' ? (f16 ? ['onnx/model_fp16.onnx', 'onnx/model.onnx'] : ['onnx/model.onnx', 'onnx/model_fp16.onnx']).map(f => base + f)
+        : ['onnx/model_quantized.onnx', 'onnx/model_int8.onnx', 'onnx/model.onnx'].map(f => base + f);
+      try {
+        setStage(`finding model file (${be})…`);
+        let url = null;
+        for (const f of files) { if (files.length === 1 || await urlExists(f)) { url = f; break; } dlog('not found: ' + f); }
+        if (!url) throw new Error('no model file found (tried ' + files.map(f => f.split('/').pop()).join(', ') + ')');
+        const name = url.split('/').pop().split('?')[0];
+        stage = '';
+        const buf = await fetchCached(url, (fr, n, cached) => setStatus(cached ? `model from cache (${mb(n)})` : `downloading ${name} ${Number.isFinite(fr) ? Math.round(100 * fr) + '%' : mb(n)}`));
+        dlog(`model ${name}: ${mb(buf.length)}`);
+        const opts = { executionProviders: [be === 'webgpu' ? { name: 'webgpu' } : 'wasm'], graphOptimizationLevel: 'all' };
+        const extUrl = url.replace(/\.onnx(\?.*)?$/, '.onnx_data');
+        if (await urlExists(extUrl)) {
+          const ext = await fetchCached(extUrl, (fr, n, cached) => setStatus(cached ? 'weights from cache' : `downloading weights ${Number.isFinite(fr) ? Math.round(100 * fr) + '%' : mb(n)}`));
+          opts.externalData = [{ path: name + '_data', data: ext }];
+          dlog(`external weights: ${mb(ext.length)}`);
+        }
+        setStage(`creating ${be} session…`);
+        const sess = await withTimeout(ort.InferenceSession.create(buf, opts), be === 'webgpu' ? 60000 : 120000, `${be} session creation`);
+        const im = sess.inputMetadata && sess.inputMetadata[0];
+        const shape = im && im.shape ? Array.from(im.shape) : null, type = (im && im.type) || 'float32';
+        dlog(`session ok on ${be} in ${((performance.now() - t0) / 1000).toFixed(1)} s · input ${sess.inputNames[0]} [${shape || '?'}] ${type} · outputs ${sess.outputNames.join(', ')}`);
+        const eng = { ort, sess, be, inName: sess.inputNames[0], rank: shape ? shape.length : 4, type, mean, std,
+          fixedH: shape && typeof shape[shape.length - 2] === 'number' && shape[shape.length - 2] > 0 ? shape[shape.length - 2] : 0,
+          fixedW: shape && typeof shape[shape.length - 1] === 'number' && shape[shape.length - 1] > 0 ? shape[shape.length - 1] : 0,
+          outName: sess.outputNames.find(n => /depth|predicted/i.test(n) && !/conf|sky|ray/i.test(n)) || sess.outputNames[0], file: name };
+        eng.extra = planExtraInputs(sess, eng.inName);
+        for (const x of eng.extra) dlog(`extra input ${x.name} [${x.shape}] ${x.type} -> ${x.kind === 'zeros' ? 'zeros (unknown purpose)' : x.kind}`);
+        if (sess.outputNames.length > 1) dlog(`using output ${eng.outName} (of ${sess.outputNames.join(', ')})`);
+        da3.eng = eng;
+        setStage(`first inference on ${be} (compiling)…`);
+        const img = await nextFrame(1500);
+        const tt = performance.now();
+        const r = await withTimeout(inferDepth(img), be === 'webgpu' ? 90000 : 180000, `first ${be} inference`);
+        dlog(`network input ${r.inW}×${r.inH} (${r.fit}) · fx=${r.K[0].toFixed(1)} cx=${r.K[2].toFixed(1)} cy=${r.K[5].toFixed(1)}`);
+        dlog(`first inference ${Math.round(performance.now() - tt)} ms · output ${eng.outName} ${r.dw}×${r.dh}`);
+        const t2 = performance.now(); await inferDepth(img); const warm = Math.round(performance.now() - t2);
+        img.close();
+        dlog(`warm inference ${warm} ms`);
+        stage = ''; da3.ready = true; da3.status = `ready · ${be} · ${name} · ${warm} ms/frame`;
+        lastErr = null;
+        break;
+      } catch (e) { lastErr = e; da3.eng = null; dlog(`${be} failed: ${e.message || e}`); if (be !== backends[backends.length - 1]) dlog('falling back to next backend'); }
+    }
+    if (lastErr) throw lastErr;
+  } catch (e) { da3.status = 'error: ' + (e.message || e); }
+  clearInterval(tick);
+  da3.loading = false; da3post();
+}
+function da3Geometry(sw, sh, eng, size, fit) {
+  const r14 = v => Math.max(14, Math.round(v / 14) * 14);
+  let W, H;
+  if (eng.fixedW && eng.fixedH) { W = eng.fixedW; H = eng.fixedH; fit = 'fixed'; }
+  else if (fit === 'square') { W = H = r14(size); }
+  else { const s = size / Math.max(sw, sh); W = r14(sw * s); H = r14(sh * s); }
+  let cw = sw, ch = sh;
+  if (cw / ch > W / H) cw = ch * W / H; else ch = cw * H / W;
+  return { W, H, cw, ch, ox: (sw - cw) / 2, oy: (sh - ch) / 2, sx: W / cw, sy: H / ch, fit };
+}
+function kfPoseMats(kf) {
+  const cam = est && est.cam, I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  if (!kf || !cam) return { w2c: I, c2w: I };
+  const R = VIO.mm(kf.R, cam.Rbc), p = kf.p, t = VIO.mtv(R, p);
+  return { w2c: [R[0], R[3], R[6], -t[0], R[1], R[4], R[7], -t[1], R[2], R[5], R[8], -t[2], 0, 0, 0, 1], c2w: [R[0], R[1], R[2], p[0], R[3], R[4], R[5], p[1], R[6], R[7], R[8], p[2], 0, 0, 0, 1] };
+}
+function planExtraInputs(sess, inName) {
+  return sess.inputNames.map((name, i) => ({ name, meta: sess.inputMetadata ? sess.inputMetadata[i] : null })).filter(x => x.name !== inName).map(x => {
+    const shape = x.meta && x.meta.shape ? Array.from(x.meta.shape).map(d => (typeof d === 'number' && d > 0) ? d : 1) : [1];
+    const kind = /intrin|^k$|_k$|camera_k|focal/i.test(x.name) ? 'K' : /c2w|cam2world|camera_to_world/i.test(x.name) ? 'c2w' : /extrin|pose|w2c|world2cam|world_to_camera/i.test(x.name) ? 'w2c' : 'zeros';
+    return { name: x.name, shape, type: (x.meta && x.meta.type) || 'float32', kind };
+  });
+}
+function fillExtra(eng, x, K, mats) {
+  const n = x.shape.reduce((a, b) => a * b, 1), v = new Float32Array(n);
+  const src = x.kind === 'K' ? K : x.kind === 'w2c' ? mats.w2c : x.kind === 'c2w' ? mats.c2w : null;
+  if (src) {
+    const per = x.shape[x.shape.length - 1] * (x.shape.length > 1 ? x.shape[x.shape.length - 2] : 1);
+    const blk = per === 12 ? src.slice(0, 12) : per === 16 ? src : per === 9 ? src : per === 4 && x.kind === 'K' ? [K[0], K[4], K[2], K[5]] : null;
+    if (blk) for (let i = 0; i < n; i++) v[i] = blk[i % blk.length];
+  }
+  if (x.type === 'int64') return new eng.ort.Tensor('int64', BigInt64Array.from(v, a => BigInt(Math.round(a))), x.shape);
+  return x.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(v) : floatToHalf(v), x.shape) : new eng.ort.Tensor('float32', v, x.shape);
+}
+let dcv = null, dctx = null;
+async function inferDepth(src, o = {}) {
+  const eng = da3.eng;
+  if (!eng) throw new Error('DA3 engine not loaded');
+  const tAll = performance.now(), sw = src.displayWidth || src.width, sh = src.displayHeight || src.height;
+  const g = da3Geometry(sw, sh, eng, o.size || da3.cfg.size, o.fit || da3.cfg.fit);
+  if (!dcv || dcv.width !== g.W || dcv.height !== g.H) { dcv = new OffscreenCanvas(g.W, g.H); dctx = dcv.getContext('2d', { willReadFrequently: true }); }
+  dctx.drawImage(src, g.ox, g.oy, g.cw, g.ch, 0, 0, g.W, g.H);
+  const px = dctx.getImageData(0, 0, g.W, g.H).data, n = g.W * g.H, chw = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) chw[c * n + i] = (px[4 * i + c] / 255 - eng.mean[c]) / eng.std[c];
+  const dims = eng.rank === 5 ? [1, 1, 3, g.H, g.W] : [1, 3, g.H, g.W];
+  const feeds = { [eng.inName]: eng.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(chw) : floatToHalf(chw), dims) : new eng.ort.Tensor('float32', chw, dims) };
+  const cam = est && est.cam, ks = cam ? sw / cam.W : 1;
+  const K = cam ? [cam.f * ks * g.sx, 0, (cam.cx * ks - g.ox) * g.sx, 0, cam.f * ks * g.sy, (cam.cy * ks - g.oy) * g.sy, 0, 0, 1] : [g.W, 0, g.W / 2, 0, g.W, g.H / 2, 0, 0, 1];
+  const mats = kfPoseMats(o.kf);
+  for (const x of eng.extra) feeds[x.name] = fillExtra(eng, x, K, mats);
+  const tRun = performance.now();
+  const out = await eng.sess.run(feeds);
+  const ms = performance.now() - tRun;
+  const t = out[eng.outName], od = t.dims, dh = od[od.length - 2], dw = od[od.length - 1];
+  let data = t.data;
+  data = data instanceof Float32Array ? data : (t.type === 'float16' && data instanceof Uint16Array) ? halfToFloat(data) : Float32Array.from(data);
+  if (data.length !== dw * dh) data = data.subarray(0, dw * dh);
+  let finite = 0; for (let i = 0; i < data.length; i += 7) if (Number.isFinite(data[i])) finite++;
+  if (!finite) throw new Error('depth output is all NaN/Inf (try da3File onnx/model.onnx)');
+  const map = (u, v) => [((u * ks - g.ox) * g.sx + 0.5) * dw / g.W - 0.5, ((v * ks - g.oy) * g.sy + 0.5) * dh / g.H - 0.5];
+  postInset(data, dw, dh);
+  da3.runs++;
+  return { data, dw, dh, map, K, ms, totalMs: performance.now() - tAll, inW: g.W, inH: g.H, fit: g.fit };
+}
+function postInset(data, dw, dh) { // small colour-mapped preview for the page
+  const s = Array.from({ length: 200 }, (_, i) => data[Math.floor(i * data.length / 200)]).filter(Number.isFinite).sort((a, b) => a - b);
+  const lo = s[Math.floor(s.length * 0.02)], hi = s[Math.floor(s.length * 0.98)] || lo + 1;
+  const k = Math.max(1, Math.ceil(dw / 160)), w = Math.floor(dw / k), h = Math.floor(dh / k), rgba = new Uint8ClampedArray(4 * w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const t = Math.max(0, Math.min(1, (data[y * k * dw + x * k] - lo) / (hi - lo || 1))), i = 4 * (y * w + x);
+    rgba[i] = 255 * Math.min(1, Math.max(0, 3 * t - 1)); rgba[i + 1] = 255 * Math.max(0, 1 - Math.abs(2 * t - 1) * 1.1); rgba[i + 2] = 255 * Math.min(1, Math.max(0, 1.4 - 2.2 * t)); rgba[i + 3] = 255;
+  }
+  post({ type: 'inset', w, h, rgba, lo, hi }, [rgba.buffer]);
+}
+async function runDA3(kfId, bmp) {
+  da3.busy = true;
+  try {
+    const kf = kfId != null ? est.kfById.get(kfId) : null;
+    const r = await inferDepth(bmp, { kf });
+    da3.ms = r.ms;
+    if (kfId == null) da3.status = da3.cfg.scanning ? `running ${r.inW}×${r.inH} · scan starting` : `ready ${r.inW}×${r.inH} · tap Start scan`;
+    else {
+      const res = est.addDepthMap(kfId, r.data, r.dw, r.dh, { map: r.map });
+      if (res && res.ok) { da3.aligned++; da3.status = `map ${res.n} pts (${res.nTri} triangulated) · ${est.da3.mode} · ${Number.isFinite(est.da3Scale()) ? est.da3Scale().toPrecision(3) + ' m/unit' : ''}${Number.isFinite(res.err) ? ' · err ' + (100 * res.err).toFixed(0) + '%' : ''}`; }
+      else da3.status = !res ? 'keyframe left the window before its depth arrived' : `only ${res.n} features on this keyframe`;
+    }
+  } catch (e) { da3.status = 'run error: ' + (e.message || e); }
+  finally { bmp.close(); }
+  da3.busy = false; da3.lastRun = performance.now(); da3post();
+}
+async function benchmarkDA3(id) {
+  const eng = da3.eng;
+  if (!eng) { post({ type: 'da3bench', id, error: 'install DA3 first' }); return; }
+  while (da3.busy) await new Promise(r => setTimeout(r, 50));
+  da3.busy = true;
+  const src = await nextFrame(1500), rows = [];
+  try {
+    const cfgs = eng.fixedW ? [[eng.fixedW, 'fixed']] : [[280, 'square'], [392, 'square'], [504, 'square'], [504, 'aspect']];
+    for (const [size, fit] of cfgs) {
+      setStatus(`benchmark ${size} ${fit}…`);
+      const t0 = performance.now();
+      const first = await withTimeout(inferDepth(src, { size, fit }), 120000, 'benchmark run');
+      const firstMs = performance.now() - t0, times = [], totals = [];
+      for (let i = 0; i < 5; i++) { const r = await inferDepth(src, { size, fit }); times.push(r.ms); totals.push(r.totalMs); }
+      rows.push({ size, fit: first.fit, inW: first.inW, inH: first.inH, outW: first.dw, outH: first.dh, firstMs: Math.round(firstMs), medMs: Math.round(VIO.median(times)), minMs: Math.round(Math.min(...times)), totalMs: Math.round(VIO.median(totals)) });
+      post({ type: 'da3rows', rows });
+    }
+    dlog('benchmark: ' + rows.map(r => `${r.inW}×${r.inH} ${r.medMs}ms`).join(', '));
+    da3.status = `ready · ${eng.be} · ${eng.file}`;
+    post({ type: 'da3bench', id, rows, backend: eng.be, file: eng.file, adapter: da3.adapterInfo });
+  } catch (e) { post({ type: 'da3bench', id, error: e.message || String(e) }); }
+  finally { src.close(); da3.busy = false; da3post(); }
+}
+// what happens to a processed frame's full-resolution bitmap
+function routeBitmap(bmp, kf) {
+  if (da3.waiters.length) { da3.waiters.shift()(bmp); return; }
+  if (da3.ready && !da3.busy && est) {
+    if (kf) { runDA3(kf.id, bmp); return; }
+    if (est.status !== 'tracking' && performance.now() - da3.lastRun > 1500) { runDA3(null, bmp); return; }
+  }
+  bmp.close();
+}
+let oc = null, octx = null;
+function toGray(fr) {
+  if (fr.gray) return;
+  if (!oc || oc.width !== fr.W || oc.height !== fr.H) { oc = new OffscreenCanvas(fr.W, fr.H); octx = oc.getContext('2d', { willReadFrequently: true }); }
+  octx.drawImage(fr.bmp, 0, 0, fr.W, fr.H); // full-resolution bitmap is kept for DA3
+  const d = octx.getImageData(0, 0, fr.W, fr.H).data, g = new Float32Array(fr.W * fr.H);
+  for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+  fr.gray = g;
+}
+function processFrame(fr) {
+  toGray(fr);
+  const cam = est.cam;
+  if (!cam) { post({ type: 'frame', seq: fr.seq, t: fr.t, tracks: new Float32Array(0), kltMs: 0, kf: null, reset: null, state: light() }); routeBitmap(fr.bmp, null); return; }
+  let predict = null;
+  if (prevT != null && usePredict && mode === 'running') {
+    const dR = est.deltaRCam(prevT, fr.t), M = VIO.mtm(cam.Rbc, VIO.mtm(dR, cam.Rbc));
+    predict = (x, y) => { const q = VIO.mv(M, cam.bearing(x, y)); return q[2] > 0.2 ? [cam.f * q[0] / q[2] + cam.cx, cam.f * q[1] / q[2] + cam.cy] : null; };
+  }
+  const t0 = performance.now();
+  const tracks = trk.process(fr.gray, fr.W, fr.H, predict);
+  const kltMs = performance.now() - t0;
+  let r = null, kf = null;
+  if (mode === 'running') {
+    r = est.addFrame(fr.t, tracks);
+    if (r.kill.length) trk.kill(r.kill);
+    if (r.kf && est.status === 'tracking') { const k = est.kfs[est.kfs.length - 1]; kf = { id: k.id, R: k.R, p: k.p }; }
+  }
+  prevT = fr.t;
+  const T = new Float32Array(4 * trk.pts.length);
+  trk.pts.forEach((q, i) => { const f = est.feats.get(q.id); T[4 * i] = q.id; T[4 * i + 1] = q.x; T[4 * i + 2] = q.y; T[4 * i + 3] = f && f.lm ? (f.prior ? 2 : 1) : 0; });
+  post({ type: 'frame', seq: fr.seq, t: fr.t, tracks: T, kltMs, kf: kf ? { id: kf.id } : null, solveMs: kf ? est.solveMs : null, reset: r && r.reset, state: light() }, [T.buffer]);
+  if (mode === 'running') routeBitmap(fr.bmp, kf); else if (da3.waiters.length) da3.waiters.shift()(fr.bmp); else fr.bmp.close();
+  snapshot(!!kf);
+}
+self.onmessage = e => {
+  const m = e.data;
+  switch (m.type) {
+    case 'init': est = new VIO.Estimator(m.params); trk = new VIO.Tracker(m.trk); prevT = null; clearQueue(); mapSent = 0; break;
+    case 'params': Object.assign(est.p, m.params); break;
+    case 'trkParams': Object.assign(trk.p, m.params); if (m.reset) { trk.reset(); prevT = null; } break;
+    case 'camera': est.setCamera(VIO.makeCam(m.W, m.H, m.fov, m.theta)); break;
+    case 'imu': { const a = m.s; for (let i = 0; i + 6 < a.length; i += 7) est.addImu(a[i], [a[i + 1], a[i + 2], a[i + 3]], [a[i + 4], a[i + 5], a[i + 6]]); pump(); break; }
+    case 'frame':
+      m.arr = performance.now(); queue.push(m);
+      while (queue.length > 3) { const d = queue.shift(); if (d.bmp) d.bmp.close(); post({ type: 'dropped', seq: d.seq }); }
+      pump(); break;
+    case 'mode': mode = m.mode; usePredict = m.usePredict; if (m.resetTracker) { trk.reset(); prevT = null; clearQueue(); } break;
+    case 'reset': est.reset(m.reason); trk.reset(); prevT = null; clearQueue(); mapSent = 0; snapshot(true); break;
+    case 'startScan': est.startScan(); trk.reset(); prevT = null; clearQueue(); mapSent = 0; snapshot(true); break;
+    case 'stopScan': est.stopScan(); snapshot(true); break;
+    case 'depth': {
+      const g = m.geo, dw = m.dw, dh = m.dh;
+      const map = (u, v) => [((u * g.ks - g.ox) * g.sx + 0.5) * dw / g.W - 0.5, ((v * g.ks - g.oy) * g.sy + 0.5) * dh / g.H - 0.5];
+      const res = est.addDepthMap(m.kfId, m.data, dw, dh, { map });
+      post({ type: 'depthResult', id: m.id, res, state: light() });
+      break;
+    }
+    case 'da3cfg': Object.assign(da3.cfg, m.cfg); if (m.reload && !da3.loading) loadDA3(); break;
+    case 'da3load': (async () => { if (!da3.loading && !da3.ready) await loadDA3(); else while (da3.loading) await new Promise(r => setTimeout(r, 200)); post({ type: 'da3loaded', id: m.id }); })(); break;
+    case 'da3bench': benchmarkDA3(m.id); break;
+    case 'export': post({ type: 'export', id: m.id, traj: est.traj.map(e => ({ t: e.t, p: e.p, R: e.R })), pts: est.mapPts.concat(est.windowLandmarks()) }); break;
+  }
+};
+</script>
 
 <script>
 (() => {
@@ -1479,25 +1832,82 @@ const S = {
 const video = $('video');
 S.hist = { solve: [], klt: [], da3: [] };
 const pushHist = (a, v) => { a.push(v); if (a.length > 200) a.shift(); };
-const newEstimator = () => {
+const trkParams = () => ({ maxFeatures: SET.maxFeatures, minDist: SET.minDist, win: SET.win | 1, levels: SET.levels, fbThresh: SET.fbThresh, minEig: SET.minEig });
+// ------------------------------------------------------------------ worker + estimator mirror
+// The estimator and tracker run in a Web Worker built from the core script; EstProxy mirrors
+// the state the UI reads. Motion-sensor events stay on this thread and are forwarded in batches.
+class EstProxy {
+  constructor() {
+    this.status = 'idle'; this.pose = null; this.kfs = []; this.traj = []; this.mapPts = []; this.wl = []; this.nLm = 0; this.solveMs = 0; this.lastIters = 0;
+    this.resets = 0; this.initWhy = ''; this.da3 = { mode: '', err: NaN, maps: 0 }; this._da3Scale = NaN; this._da3Stats = { withPrior: 0, fromDA3: 0 };
+    this._path = 0; this._bias = [0, 0, 0]; this.lastBg = null; this.lastBa = null; this.nTraj = 0; this.cam = null; this.p = {}; this.imu = new ImuBuf();
+  }
+  pathLength() { return this._path; }
+  windowLandmarks() { return this.wl; }
+  da3Scale() { return this._da3Scale; }
+  da3Stats() { return this._da3Stats; }
+  bias() { return this._bias; }
+  apply(st) {
+    if (!st) return;
+    this.status = st.status; this.pose = st.pose; this.initWhy = st.initWhy; this.resets = st.resets; this.nLm = st.nLm; this.lastIters = st.lastIters; this.solveMs = st.solveMs;
+    this._bias = st.bias; this.lastBg = st.lastBg; this.lastBa = st.lastBa; this._path = st.path; this.da3 = st.da3; this._da3Scale = st.da3Scale; this._da3Stats = st.da3Stats; this.nTraj = st.nTraj;
+  }
+}
+const unflat = f => { const out = new Array(f.length / 3); for (let i = 0; i < out.length; i++) out[i] = [f[3 * i], f[3 * i + 1], f[3 * i + 2]]; return out; };
+const W_ = new Worker(URL.createObjectURL(new Blob([$('vio-core').textContent, '\n', $('vio-worker').textContent], { type: 'text/javascript' })));
+W_.onerror = e => { setHint('Estimator worker error: ' + (e.message || e), 'bad'); console.error(e); };
+const pendingReq = new Map(); let reqId = 0;
+const request = (msg, transfer) => new Promise(res => { const id = ++reqId; pendingReq.set(id, res); W_.postMessage({ ...msg, id }, transfer || []); });
+W_.onmessage = e => {
+  const m = e.data, est = S.est;
+  if (m.type === 'frame') onWorkerFrame(m);
+  else if (m.type === 'snap') {
+    est.apply(m.state); est.traj = unflat(m.traj).map(p => ({ p })); est.kfs = unflat(m.kfs).map(p => ({ p })); est.wl = unflat(m.wl);
+    if (m.mapReset) est.mapPts = [];
+    if (m.mapNew.length) est.mapPts = est.mapPts.concat(unflat(m.mapNew));
+  } else if (m.type === 'dropped') S.inflight.delete(m.seq);
+  else if (m.type === 'error') { S.inflight.delete(m.seq); setHint('Internal error, re-initialized: ' + m.message, 'bad'); }
+  else if (m.type === 'da3status') onDa3Status(m);
+  else if (m.type === 'da3log') dlog(m.msg);
+  else if (m.type === 'inset') onDa3Inset(m);
+  else if (m.type === 'da3rows') { if (S.benchOnRows) S.benchOnRows(m.rows); }
+  else if (pendingReq.has(m.id)) { const r = pendingReq.get(m.id); pendingReq.delete(m.id); r(m); }
+};
+const estParams = () => {
   const p = {}; for (const [k, , , , , to] of SCHEMA) if (to === 'est' && k in D) p[k] = SET[k];
   p.td = SET.td / 1000;
   const imu = lsGet(LS_IMU); if (imu && imu.bg) p.initBg = imu.bg;
-  return new Estimator(p);
+  return p;
 };
-const trkParams = () => ({ maxFeatures: SET.maxFeatures, minDist: SET.minDist, win: SET.win | 1, levels: SET.levels, fbThresh: SET.fbThresh, minEig: SET.minEig });
-S.est = newEstimator();
-S.trk = new Tracker(trkParams());
-
+function setEstParam(k, v) { S.est.p[k] = v; W_.postMessage({ type: 'params', params: { [k]: v } }); }
+// IMU batching: flushed every 8 ms and right before each frame
+S.imuBatch = [];
+function flushImu() { if (S.imuBatch.length) { W_.postMessage({ type: 'imu', s: S.imuBatch }); S.imuBatch = []; } }
+setInterval(flushImu, 8);
+function initEstimator() {
+  const keepImu = S.est && S.est.imu;
+  S.est = new EstProxy(); if (keepImu) S.est.imu = keepImu;
+  S.est.p = estParams();
+  W_.postMessage({ type: 'init', params: S.est.p, trk: trkParams() });
+  updateCamera(); sendMode(false);
+}
+S.inflight = new Map(); S.seq = 0; S.kfPoses = new Map(); S.prevTracks = null;
+function sendMode(resetTracker) {
+  W_.postMessage({ type: 'mode', mode: S.mode === 'calibrating' ? 'calib' : S.mode === 'running' ? 'running' : 'idle', usePredict: SET.usePredict ? 1 : 0, resetTracker });
+}
 const screenAngle = () => (screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle : (window.orientation || 0);
 function updateCamera() {
-  if (!S.W) return;
-  S.est.setCamera(makeCam(S.W, S.H, SET.fov, screenAngle() + SET.camOffset));
+  if (!S.W || !S.est) return;
+  const theta = screenAngle() + SET.camOffset;
+  S.est.cam = makeCam(S.W, S.H, SET.fov, theta);
+  W_.postMessage({ type: 'camera', W: S.W, H: S.H, fov: SET.fov, theta });
 }
 function reinit(reason) {
-  S.est.reset(reason); S.trk.reset(); S.prevT = null; S.frameQ.length = 0;
+  W_.postMessage({ type: 'reset', reason }); S.est.status = S.scanning ? 'warmup' : 'idle';
+  S.prevT = null; S.prevTracks = null;
   S.lastReset = reason || '';
 }
+initEstimator();
 
 // ------------------------------------------------------------------ diagnostics
 async function diagnose(prefix) {
@@ -1517,7 +1927,9 @@ async function diagnose(prefix) {
 
 // ------------------------------------------------------------------ IMU
 function pushImu(t, w, a) {
-  S.est.addImu(t, w, a);
+  S.est.imu.push(t, w, a);
+  if ((S.imuCount & 255) === 0) S.est.imu.trimBefore(t - 15);
+  S.imuBatch.push(t, w[0], w[1], w[2], a[0], a[1], a[2]);
   if (S.calib) S.calib.imu.push(t, w, a);
   S.imuCount++;
 }
@@ -1589,11 +2001,11 @@ async function beginScan(permP) {
   }
   if (S.mode === 'idle') { await start(permP); if (S.mode === 'idle') return; }
   if (S.mode !== 'running') { setHint('Finish calibration first.', 'warn'); return; }
-  S.scanning = true; S.est.startScan(); S.trk.reset(); S.prevT = null; S.frameQ.length = 0; S.lastReset = '';
+  S.scanning = true; W_.postMessage({ type: 'startScan' }); sendDa3Cfg(false); S.est.status = 'warmup'; S.prevT = null; S.prevTracks = null; S.lastReset = '';
   syncButtons(); setHint('Scan started — point at a textured scene and move normally.');
 }
 function endScan() {
-  S.scanning = false; S.est.stopScan(); syncButtons();
+  S.scanning = false; W_.postMessage({ type: 'stopScan' }); S.est.status = 'idle'; sendDa3Cfg(false); syncButtons();
   setHint(`Scan ended · ${S.est.pathLength().toFixed(2)} m path · ${S.est.traj.length} keyframes. Export is available.`);
 }
 function syncButtons() {
@@ -1610,7 +2022,7 @@ async function start(permP) {
   try {
     if (permP) { const r = await permP.catch(e => 'error: ' + e.message); if (r !== 'granted') diagnose(`DeviceMotionEvent.requestPermission → ${r}`); }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('getUserMedia unavailable (needs HTTPS or localhost)');
-    S.mode = 'running';
+    S.mode = 'running'; sendMode(true);
     startSensors();
     S.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: 640, height: 480, frameRate: 30 } });
     video.srcObject = S.stream;
@@ -1630,8 +2042,8 @@ async function start(permP) {
   }
 }
 function stop() {
-  if (S.scanning) { S.scanning = false; S.est.stopScan(); }
-  S.mode = 'idle'; S.calib = null;
+  if (S.scanning) { S.scanning = false; W_.postMessage({ type: 'stopScan' }); S.est.status = 'idle'; }
+  S.mode = 'idle'; S.calib = null; sendMode(true);
   stopSensors();
   if (S.stream) { for (const t of S.stream.getTracks()) t.stop(); S.stream = null; }
   video.srcObject = null;
@@ -1652,24 +2064,26 @@ function ensureProc() {
   if (!vw || !vh) return false;
   const s = SET.procSize / Math.max(vw, vh), W = Math.round(vw * s), H = Math.round(vh * s);
   if (W !== S.W || H !== S.H || !S.proc) {
-    S.W = W; S.H = H;
-    S.proc = document.createElement('canvas'); S.proc.width = W; S.proc.height = H;
-    S.pctx = S.proc.getContext('2d', { willReadFrequently: true });
-    $('view').style.aspectRatio = `${W} / ${H}`;
+    S.W = W; S.H = H; S.proc = true;
+    document.documentElement.style.setProperty('--cam-aspect', (W / H).toFixed(4));
     updateCamera(); reinit('video size ' + vw + 'x' + vh);
   }
   return true;
 }
-function grabFrame(tCam) {
+// No pixel work on this thread: each frame becomes one ImageBitmap (async) that is transferred
+// to the worker, which downsamples it for tracking and keeps it if DA3 needs the keyframe.
+async function grabFrame(tCam) {
   if (!ensureProc()) return;
-  const { W, H, pctx } = S;
-  pctx.drawImage(video, 0, 0, W, H);
-  const img = pctx.getImageData(0, 0, W, H), d = img.data, g = new Float32Array(W * H);
-  for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
-  const hi = S.da3.on && S.da3.ready ? grabHi() : null;
-  S.frameQ.push({ t: tCam, gray: g, img, hi, W, H, wall: performance.now() });
-  if (S.frameQ.length > 3) releaseHi(S.frameQ.shift().hi);
-  pump();
+  if (S.inflight.size >= 3) return; // worker is behind: skip this frame rather than queue it
+  const seq = ++S.seq, W = S.W, H = S.H;
+  S.inflight.set(seq, { t: tCam });
+  let bmp = null;
+  try { // VideoFrame wraps the decoded frame without a copy; ImageBitmap is the fallback
+    bmp = typeof VideoFrame === 'function' ? new VideoFrame(video, { timestamp: Math.round(tCam * 1e6) }) : await createImageBitmap(video);
+  } catch (e) { try { bmp = await createImageBitmap(video); } catch (e2) { S.inflight.delete(seq); return; } }
+  if (!S.inflight.has(seq)) { bmp.close(); return; }
+  flushImu();
+  W_.postMessage({ type: 'frame', seq, t: tCam, bmp, W, H }, [bmp]);
 }
 function onVideoFrame(nowMs, meta) {
   if (S.mode === 'idle') return;
@@ -1683,47 +2097,25 @@ function rafFrame(nowMs) {
   requestAnimationFrame(rafFrame);
   if (video.currentTime !== lastVT) { lastVT = video.currentTime; grabFrame(nowMs / 1000); }
 }
-// process a frame once IMU data covering its timestamp has arrived (or it is 100 ms old)
-function pump() {
-  clearTimeout(S.pumpTimer);
-  while (S.frameQ.length) {
-    const fr = S.frameQ[0], tImu = fr.t + SET.td / 1000;
-    if (S.est.imu.lastT() < tImu && performance.now() - fr.wall < 100 && S.imuCount > 0) { S.pumpTimer = setTimeout(pump, 8); return; }
-    S.frameQ.shift();
-    try { processFrame(fr); } catch (e) { console.error(e); reinit('exception: ' + e.message); setHint('Internal error, re-initialized: ' + e.message, 'bad'); }
-  }
-}
-function processFrame(fr) {
-  const est = S.est, trk = S.trk, cam = est.cam;
-  if (!cam) return;
-  let predict = null;
-  if (S.prevT != null && SET.usePredict && S.mode === 'running') {
-    const dR = est.deltaRCam(S.prevT, fr.t), M = mtm(cam.Rbc, mtm(dR, cam.Rbc));
-    predict = (x, y) => { const q = mv(M, cam.bearing(x, y)); return q[2] > 0.2 ? [cam.f * q[0] / q[2] + cam.cx, cam.f * q[1] / q[2] + cam.cy] : null; };
-  }
-  const prevPos = S.mode === 'calibrating' ? new Map(trk.pts.map(q => [q.id, [q.x, q.y]])) : null;
-  const t0 = performance.now();
-  const tracks = trk.process(fr.gray, fr.W, fr.H, predict);
-  S.trackMs = performance.now() - t0; pushHist(S.hist.klt, S.trackMs);
-  if (S.mode === 'calibrating') {
-    if (S.prevT != null) {
+// result of one frame from the worker: tracks, keyframe event, estimator state
+function onWorkerFrame(m) {
+  const fr = S.inflight.get(m.seq) || {}; S.inflight.delete(m.seq);
+  S.est.apply(m.state);
+  const T = m.tracks, tracks = new Array(T.length / 4);
+  for (let i = 0; i < tracks.length; i++) tracks[i] = { id: T[4 * i], x: T[4 * i + 1], y: T[4 * i + 2], flag: T[4 * i + 3] };
+  S.trackMs = m.kltMs; pushHist(S.hist.klt, m.kltMs);
+  if (S.mode === 'calibrating' && S.calib) {
+    if (S.prevTracks && S.prevT != null) {
       const a = [], b = [];
-      for (const q of tracks) { const o = prevPos.get(q.id); if (o) { a.push(o[0], o[1]); b.push(q.x, q.y); } }
-      if (a.length >= 16) S.calib.pairs.push({ t0: S.prevT, t1: fr.t, a, b });
+      for (const q of tracks) { const o = S.prevTracks.get(q.id); if (o) { a.push(o[0], o[1]); b.push(q.x, q.y); } }
+      if (a.length >= 16) S.calib.pairs.push({ t0: S.prevT, t1: m.t, a, b });
     }
     if (performance.now() - S.calib.start > 5000) finishCalib();
   } else if (S.mode === 'running') {
-    const r = est.addFrame(fr.t, tracks);
-    if (r.kill.length) trk.kill(r.kill);
-    if (r.kf && est.status === 'tracking') pushHist(S.hist.solve, est.solveMs);
-    if (r.reset) { S.lastReset = r.reset; setHint(`Tracking lost (${r.reset}) — re-initializing automatically.`, 'warn'); }
-    if (S.da3.on && S.da3.ready && !S.da3.busy) {
-      if (r.kf && est.status === 'tracking') { runDA3(est.lastKfId, fr.hi || fr.img); fr.hi = null; }
-      else if (est.status !== 'tracking' && performance.now() - (S.da3.lastRun || 0) > 1500) { runDA3(null, fr.hi || fr.img); fr.hi = null; }
-    }
+    if (m.solveMs != null) pushHist(S.hist.solve, m.solveMs);
+    if (m.reset) { S.lastReset = m.reset; setHint(`Tracking lost (${m.reset}) — re-initializing automatically.`, 'warn'); }
   }
-  S.prevT = fr.t; S.lastTracks = tracks; S.frames++;
-  if (fr.hi) releaseHi(fr.hi);
+  S.prevT = m.t; S.prevTracks = new Map(tracks.map(q => [q.id, [q.x, q.y]])); S.lastTracks = tracks; S.frames++;
   drawView(tracks);
 }
 
@@ -1735,11 +2127,11 @@ function startCalib() { return new Promise(resolve => {
   const imu = new ImuBuf();
   for (const s of S.est.imu.a) imu.push(s.t, s.w, s.a);
   S.calib = { start: performance.now(), pairs: [], imu, bg: S.est.bias().slice() };
-  S.mode = 'calibrating'; S.trk.reset(); S.prevT = null;
+  S.mode = 'calibrating'; sendMode(true); S.prevT = null; S.prevTracks = null;
   setHint('Calibrating: rotate the phone in place (twist and tilt, don\'t walk) for 5 s.');
 }); }
 function finishCalib() {
-  const c = S.calib; S.mode = 'solving';
+  const c = S.calib; S.mode = 'solving'; sendMode(false);
   setHint('Solving calibration…');
   setTimeout(() => {
     let r = null;
@@ -1750,21 +2142,17 @@ function finishCalib() {
     else {
       SET.fov = Math.round(r.fov * 10) / 10; SET.td = Math.round(r.td * 1000); SET.camOffset = r.offset;
       lsSet(LS_CAL, { fov: SET.fov, td: SET.td, camOffset: SET.camOffset }); saveSettings(); renderSettings();
-      S.est.p.td = SET.td / 1000; updateCamera();
+      setEstParam('td', SET.td / 1000); updateCamera();
       S.lastCalib = r; ok = true;
       setHint(`Calibrated: FOV ${SET.fov}°, td ${SET.td} ms, offset ${SET.camOffset}° · residual ${r.rms.toFixed(2)} px (was ${r.rmsNoComp.toFixed(1)} px).`);
     }
-    if (S.mode !== 'idle') { S.mode = 'running'; reinit('calibrated'); }
+    if (S.mode !== 'idle') { S.mode = 'running'; sendMode(true); reinit('calibrated'); }
     const done = S.calibResolve; S.calibResolve = null; if (done) done({ ok, r });
   }, 30);
 }
 
 // ------------------------------------------------------------------ DA3 depth prior
-// The ONNX model runs directly on ONNX Runtime Web (WebGPU, falling back to WASM).
-// Every stage has a timeout and is reported in the status line and the DA3 log;
-// the model file is cached in Cache Storage so it only downloads once.
-const ORT_VER = '1.30.0', ORT_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`;
-const MODEL_CACHE = 'pocketvio-models-v1';
+// DA3 runs in the worker (see vio-worker); this side shows its status, log and depth inset.
 $('da3Install').addEventListener('click', () => $('ss_da3').click());
 const da3Log = [];
 function dlog(msg) {
@@ -1772,287 +2160,35 @@ function dlog(msg) {
   console.log('[DA3]', msg);
   const el = $('da3Log'); el.textContent = da3Log.slice(-14).join('\n'); el.style.display = 'block';
 }
-function withTimeout(p, ms, what) {
-  let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(t));
+function da3Cfg() { return { model: SET.da3Model, file: SET.da3File, backend: SET.da3Backend, size: SET.da3Size, fit: SET.da3Fit, scanning: S.scanning }; }
+const sendDa3Cfg = reload => W_.postMessage({ type: 'da3cfg', cfg: da3Cfg(), reload: !!reload });
+sendDa3Cfg(false);
+function onDa3Status(m) {
+  const st = S.da3, prevRuns = st.runs;
+  Object.assign(st, { status: m.status, ready: m.ready, loading: m.loading, busy: m.busy, runs: m.runs, aligned: m.aligned, ms: m.ms, adapterInfo: m.adapterInfo, eng: m.eng });
+  if (m.runs > prevRuns && m.ms) pushHist(S.hist.da3, m.ms);
 }
-async function urlExists(url) {
-  try { const r = await fetch(url, { method: 'HEAD' }); return r.ok; } catch (e) { return false; }
-}
-async function fetchCached(url, onProg) {
-  let cache = null;
-  try { cache = await caches.open(MODEL_CACHE); const hit = await cache.match(url); if (hit) { const b = new Uint8Array(await hit.arrayBuffer()); onProg(1, b.length, true); return b; } } catch (e) { cache = null; }
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
-  const total = Number(res.headers.get('content-length')) || 0, reader = res.body.getReader(), parts = [];
-  let got = 0;
-  for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length; onProg(total ? got / total : NaN, got, false); }
-  const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
-  if (cache) { try { await cache.put(url, new Response(buf)); } catch (e) { dlog('could not cache model: ' + e.message); } }
-  return buf;
-}
-function floatToHalf(f32) {
-  const out = new Uint16Array(f32.length), fv = new Float32Array(1), iv = new Uint32Array(fv.buffer);
-  for (let i = 0; i < f32.length; i++) {
-    fv[0] = f32[i]; const x = iv[0], s = (x >>> 16) & 0x8000, e = ((x >>> 23) & 0xff) - 127 + 15, m = x & 0x7fffff;
-    out[i] = e <= 0 ? s : e >= 31 ? s | 0x7c00 : s | (e << 10) | (m >>> 13);
-  }
-  return out;
-}
-function halfToFloat(u16) {
-  const out = new Float32Array(u16.length);
-  for (let i = 0; i < u16.length; i++) {
-    const h = u16[i], s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, m = h & 1023;
-    out[i] = e === 0 ? s * 5.960464477539063e-8 * m : e === 31 ? (m ? NaN : s * Infinity) : s * Math.pow(2, e - 15) * (1 + m / 1024);
-  }
-  return out;
-}
-const mb = n => (n / 1048576).toFixed(1) + ' MB';
-async function loadDA3() {
-  const st = S.da3; st.loading = true; st.ready = false; st.error = '';
-  let tick = 0, stage = '', t0 = performance.now();
-  const setStage = s => { stage = s; t0 = performance.now(); st.status = s; };
-  tick = setInterval(() => { if (stage) st.status = `${stage} ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
-  try {
-    setStage('loading ONNX Runtime…');
-    const ort = await withTimeout(import(ORT_BASE + 'ort.webgpu.min.mjs'), 60000, 'ONNX Runtime import');
-    ort.env.wasm.wasmPaths = ORT_BASE;
-    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
-    let adapter = null, f16 = false;
-    if (navigator.gpu) {
-      try { adapter = await withTimeout(navigator.gpu.requestAdapter(), 10000, 'WebGPU adapter'); } catch (e) { dlog(e.message); }
-      if (adapter) {
-        f16 = adapter.features.has('shader-f16');
-        const info = adapter.info || {};
-        st.adapterInfo = `${info.vendor || '?'} ${info.architecture || ''} f16=${f16}`;
-        dlog(`WebGPU adapter: ${info.vendor || '?'} ${info.architecture || ''} ${info.description || ''} · shader-f16=${f16}`);
-      } else dlog('WebGPU: no adapter');
-    } else dlog('WebGPU: navigator.gpu missing');
-    const want = SET.da3Backend;
-    const backends = want === 'wasm' ? ['wasm'] : want === 'webgpu' ? ['webgpu'] : adapter ? ['webgpu', 'wasm'] : ['wasm'];
-    const id = SET.da3Model.trim();
-    const direct = /^https?:\/\/.*\.onnx(\?.*)?$/.test(id);
-    const base = direct ? id.replace(/[^/]*$/, '') : /^https?:/.test(id) ? id.replace(/\/$/, '') + '/' : `https://huggingface.co/${id}/resolve/main/`;
-    // normalisation from preprocessor_config.json when available
-    let mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
-    if (!direct) {
-      try { const pc = await (await withTimeout(fetch(base + 'preprocessor_config.json'), 15000, 'preprocessor config')).json();
-        if (pc.image_mean) mean = pc.image_mean; if (pc.image_std) std = pc.image_std; dlog(`preprocessor: mean=${mean} std=${std}`); }
-      catch (e) { dlog('no preprocessor_config.json, using ImageNet mean/std'); }
-    }
-    let lastErr = null;
-    for (const be of backends) {
-      const files = direct ? [id] : SET.da3File !== 'auto' ? [base + SET.da3File]
-        : be === 'webgpu' ? (f16 ? ['onnx/model_fp16.onnx', 'onnx/model.onnx'] : ['onnx/model.onnx', 'onnx/model_fp16.onnx']).map(f => base + f)
-        : ['onnx/model_quantized.onnx', 'onnx/model_int8.onnx', 'onnx/model.onnx'].map(f => base + f);
-      try {
-        setStage(`finding model file (${be})…`);
-        let url = null;
-        for (const f of files) { if (files.length === 1 || await urlExists(f)) { url = f; break; } dlog('not found: ' + f); }
-        if (!url) throw new Error('no model file found (tried ' + files.map(f => f.split('/').pop()).join(', ') + ')');
-        const name = url.split('/').pop().split('?')[0];
-        stage = '';
-        const buf = await fetchCached(url, (fr, n, cached) => { st.status = cached ? `model from cache (${mb(n)})` : `downloading ${name} ${Number.isFinite(fr) ? Math.round(100 * fr) + '%' : mb(n)}`; });
-        dlog(`model ${name}: ${mb(buf.length)}`);
-        const opts = { executionProviders: [be === 'webgpu' ? { name: 'webgpu' } : 'wasm'], graphOptimizationLevel: 'all' };
-        const extUrl = url.replace(/\.onnx(\?.*)?$/, '.onnx_data');
-        if (await urlExists(extUrl)) {
-          stage = '';
-          const ext = await fetchCached(extUrl, (fr, n, cached) => { st.status = cached ? 'weights from cache' : `downloading weights ${Number.isFinite(fr) ? Math.round(100 * fr) + '%' : mb(n)}`; });
-          opts.externalData = [{ path: name + '_data', data: ext }];
-          dlog(`external weights: ${mb(ext.length)}`);
-        }
-        setStage(`creating ${be} session…`);
-        const sess = await withTimeout(ort.InferenceSession.create(buf, opts), be === 'webgpu' ? 60000 : 120000, `${be} session creation`);
-        const im = sess.inputMetadata && sess.inputMetadata[0];
-        const shape = im && im.shape ? Array.from(im.shape) : null, type = (im && im.type) || 'float32';
-        dlog(`session ok on ${be} in ${((performance.now() - t0) / 1000).toFixed(1)} s · input ${sess.inputNames[0]} [${shape || '?'}] ${type} · outputs ${sess.outputNames.join(', ')}`);
-        const eng = { ort, sess, be, inName: sess.inputNames[0], rank: shape ? shape.length : 4, type, mean, std,
-          fixedH: shape && typeof shape[shape.length - 2] === 'number' && shape[shape.length - 2] > 0 ? shape[shape.length - 2] : 0,
-          fixedW: shape && typeof shape[shape.length - 1] === 'number' && shape[shape.length - 1] > 0 ? shape[shape.length - 1] : 0,
-          outName: sess.outputNames.find(n => /depth|predicted/i.test(n) && !/conf|sky|ray/i.test(n)) || sess.outputNames[0], file: name };
-        eng.extra = planExtraInputs(sess, eng.inName);
-        for (const x of eng.extra) dlog(`extra input ${x.name} [${x.shape}] ${x.type} -> ${x.kind === 'zeros' ? 'zeros (unknown purpose)' : x.kind}`);
-        if (sess.outputNames.length > 1) dlog(`using output ${eng.outName} (of ${sess.outputNames.join(', ')})`);
-        st.eng = eng;
-        // first run compiles the GPU shaders: time-box it separately
-        setStage(`first inference on ${be} (compiling)…`);
-        const img = S.pctx && S.W ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(270, 360);
-        const tt = performance.now();
-        const r = await withTimeout(inferDepth(img), be === 'webgpu' ? 90000 : 180000, `first ${be} inference`);
-        dlog(`network input ${r.inW}×${r.inH} (${r.fit}) · fx=${r.K[0].toFixed(1)} cx=${r.K[2].toFixed(1)} cy=${r.K[5].toFixed(1)}`);
-        dlog(`first inference ${Math.round(performance.now() - tt)} ms · output ${eng.outName} ${r.dw}×${r.dh}`);
-        const t2 = performance.now(); await inferDepth(img); const warm = Math.round(performance.now() - t2);
-        dlog(`warm inference ${warm} ms`);
-        stage = ''; st.ready = true; st.status = `ready · ${be} · ${name} · ${warm} ms/frame`;
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e; st.eng = null; dlog(`${be} failed: ${e.message || e}`);
-        if (be !== backends[backends.length - 1]) dlog('falling back to next backend');
-      }
-    }
-    if (lastErr) throw lastErr;
-  } catch (e) {
-    console.error('DA3 load failed', e);
-    st.error = e.message || String(e);
-    st.status = 'error: ' + st.error;
-  }
-  clearInterval(tick);
-  st.loading = false;
-}
-// Network input geometry: centre-crop the source to the input aspect, then scale.
-// 'square' = W=H=size (crops the long side), 'aspect' = keep the camera aspect.
-function da3Geometry(sw, sh, eng, size, fit) {
-  const r14 = v => Math.max(14, Math.round(v / 14) * 14);
-  let W, H;
-  if (eng.fixedW && eng.fixedH) { W = eng.fixedW; H = eng.fixedH; fit = 'fixed'; }
-  else if (fit === 'square') { W = H = r14(size); }
-  else { const s = size / Math.max(sw, sh); W = r14(sw * s); H = r14(sh * s); }
-  let cw = sw, ch = sh;
-  if (cw / ch > W / H) cw = ch * W / H; else ch = cw * H / W;
-  return { W, H, cw, ch, ox: (sw - cw) / 2, oy: (sh - ch) / 2, sx: W / cw, sy: H / ch, fit };
-}
-// camera pose of a keyframe as 4x4 row-major world->camera / camera->world (OpenCV camera axes)
-function kfPoseMats(kf) {
-  const cam = S.est.cam;
-  if (!kf || !cam) return { w2c: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], c2w: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
-  const R = VIO.mm(kf.R, cam.Rbc), p = kf.p, t = VIO.mtv(R, p);
-  return {
-    w2c: [R[0], R[3], R[6], -t[0], R[1], R[4], R[7], -t[1], R[2], R[5], R[8], -t[2], 0, 0, 0, 1],
-    c2w: [R[0], R[1], R[2], p[0], R[3], R[4], R[5], p[1], R[6], R[7], R[8], p[2], 0, 0, 0, 1],
-  };
-}
-// how to fill model inputs other than the image (intrinsics / extrinsics if the export has them)
-function planExtraInputs(sess, inName) {
-  return sess.inputNames.map((name, i) => ({ name, meta: sess.inputMetadata ? sess.inputMetadata[i] : null })).filter(x => x.name !== inName).map(x => {
-    const shape = x.meta && x.meta.shape ? Array.from(x.meta.shape).map(d => (typeof d === 'number' && d > 0) ? d : 1) : [1];
-    const kind = /intrin|^k$|_k$|camera_k|focal/i.test(x.name) ? 'K' : /c2w|cam2world|camera_to_world/i.test(x.name) ? 'c2w' : /extrin|pose|w2c|world2cam|world_to_camera/i.test(x.name) ? 'w2c' : 'zeros';
-    return { name: x.name, shape, type: (x.meta && x.meta.type) || 'float32', kind };
-  });
-}
-function fillExtra(eng, x, K, mats) {
-  const n = x.shape.reduce((a, b) => a * b, 1), v = new Float32Array(n);
-  const src = x.kind === 'K' ? K : x.kind === 'w2c' ? mats.w2c : x.kind === 'c2w' ? mats.c2w : null;
-  if (src) {
-    const per = x.shape[x.shape.length - 1] * (x.shape.length > 1 ? x.shape[x.shape.length - 2] : 1);
-    const blk = per === 12 ? src.slice(0, 12) : per === 16 ? src : per === 9 ? src : per === 4 && x.kind === 'K' ? [K[0], K[4], K[2], K[5]] : null;
-    if (blk) for (let i = 0; i < n; i++) v[i] = blk[i % blk.length];
-  }
-  if (x.type === 'int64') return new eng.ort.Tensor('int64', BigInt64Array.from(v, a => BigInt(Math.round(a))), x.shape);
-  return x.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(v) : floatToHalf(v), x.shape) : new eng.ort.Tensor('float32', v, x.shape);
-}
-// run the model on a canvas or ImageData; returns depth + a proc-pixel -> depth-pixel map
-async function inferDepth(src, o = {}) {
-  const st = S.da3, eng = st.eng;
-  if (!eng) throw new Error('DA3 engine not loaded');
-  const tAll = performance.now();
-  let srcC = src;
-  if (src instanceof ImageData) {
-    if (!st.src) st.src = document.createElement('canvas');
-    st.src.width = src.width; st.src.height = src.height; st.src.getContext('2d').putImageData(src, 0, 0); srcC = st.src;
-  }
-  const sw = srcC.width, sh = srcC.height;
-  const g = da3Geometry(sw, sh, eng, o.size || SET.da3Size, o.fit || SET.da3Fit);
-  if (!st.dst) st.dst = document.createElement('canvas');
-  st.dst.width = g.W; st.dst.height = g.H;
-  const dctx = st.dst.getContext('2d', { willReadFrequently: true });
-  dctx.drawImage(srcC, g.ox, g.oy, g.cw, g.ch, 0, 0, g.W, g.H);
-  const px = dctx.getImageData(0, 0, g.W, g.H).data, n = g.W * g.H, chw = new Float32Array(3 * n);
-  for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) chw[c * n + i] = (px[4 * i + c] / 255 - eng.mean[c]) / eng.std[c];
-  const dims = eng.rank === 5 ? [1, 1, 3, g.H, g.W] : [1, 3, g.H, g.W];
-  const feeds = { [eng.inName]: eng.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(chw) : floatToHalf(chw), dims) : new eng.ort.Tensor('float32', chw, dims) };
-  // intrinsics at network-input resolution (proc -> source -> crop -> scale)
-  const cam = S.est.cam, ks = cam ? sw / cam.W : 1;
-  const K = cam ? [cam.f * ks * g.sx, 0, (cam.cx * ks - g.ox) * g.sx, 0, cam.f * ks * g.sy, (cam.cy * ks - g.oy) * g.sy, 0, 0, 1]
-    : [g.W, 0, g.W / 2, 0, g.W, g.H / 2, 0, 0, 1];
-  const mats = kfPoseMats(o.kf);
-  for (const x of eng.extra) feeds[x.name] = fillExtra(eng, x, K, mats);
-  const tRun = performance.now();
-  const out = await eng.sess.run(feeds);
-  const ms = performance.now() - tRun;
-  const t = out[eng.outName], od = t.dims, dh = od[od.length - 2], dw = od[od.length - 1];
-  let data = t.data;
-  data = data instanceof Float32Array ? data : (t.type === 'float16' && data instanceof Uint16Array) ? halfToFloat(data) : Float32Array.from(data);
-  if (data.length !== dw * dh) data = data.subarray(0, dw * dh);
-  let finite = 0; for (let i = 0; i < data.length; i += 7) if (Number.isFinite(data[i])) finite++;
-  if (!finite) throw new Error('depth output is all NaN/Inf (try da3File onnx/model.onnx)');
-  const map = (u, v) => [((u * ks - g.ox) * g.sx + 0.5) * dw / g.W - 0.5, ((v * ks - g.oy) * g.sy + 0.5) * dh / g.H - 0.5];
-  drawDepthInset(data, dw, dh);
-  st.runs = (st.runs || 0) + 1;
-  return { data, dw, dh, map, K, ms, totalMs: performance.now() - tAll, inW: g.W, inH: g.H, fit: g.fit };
-}
-function drawDepthInset(data, dw, dh) {
-  const s = Array.from({ length: 200 }, (_, i) => data[Math.floor(i * data.length / 200)]).filter(Number.isFinite).sort((a, b) => a - b);
-  const lo = s[Math.floor(s.length * 0.02)], hi = s[Math.floor(s.length * 0.98)] || lo + 1;
-  const cv = $('depthInset'); cv.width = dw; cv.height = dh;
-  const ctx = cv.getContext('2d'), im = ctx.createImageData(dw, dh);
-  for (let i = 0; i < data.length; i++) {
-    const t = Math.max(0, Math.min(1, (data[i] - lo) / (hi - lo || 1)));
-    // compact "turbo"-like ramp: blue -> cyan -> yellow -> red
-    im.data[4 * i] = 255 * Math.min(1, Math.max(0, 1.5 * t * 2 - 1)); im.data[4 * i + 1] = 255 * Math.max(0, 1 - Math.abs(2 * t - 1) * 1.1);
-    im.data[4 * i + 2] = 255 * Math.min(1, Math.max(0, 1.4 - 2.2 * t)); im.data[4 * i + 3] = 255;
-  }
-  ctx.putImageData(im, 0, 0);
+function onDa3Inset(m) {
+  const cv = $('depthInset'); cv.width = m.w; cv.height = m.h;
+  cv.getContext('2d').putImageData(new ImageData(m.rgba, m.w, m.h), 0, 0);
   $('depthWrap').style.display = 'block';
-  $('depthRange').textContent = `${lo.toPrecision(3)}…${hi.toPrecision(3)}`;
+  $('depthRange').textContent = `${m.lo.toPrecision(3)}…${m.hi.toPrecision(3)}`;
 }
-async function runDA3(kfId, src) {
-  const st = S.da3; st.busy = true;
-  const t0 = performance.now();
-  try {
-    const kf = kfId != null ? S.est.kfById.get(kfId) : null;
-    const r = await inferDepth(src, { kf });
-    pushHist(S.hist.da3, r.ms);
-    if (kfId == null) st.status = S.scanning ? `running ${r.inW}×${r.inH} · scan starting` : `ready ${r.inW}×${r.inH} · tap Start scan`;
-    else {
-      const res = S.est.addDepthMap(kfId, r.data, r.dw, r.dh, { map: r.map }), da = S.est.da3;
-      if (res && res.ok) { st.aligned = (st.aligned || 0) + 1; st.status = `map ${res.n} pts (${res.nTri} triangulated) · ${da.mode} · ${Number.isFinite(S.est.da3Scale()) ? S.est.da3Scale().toPrecision(3) + ' m/unit' : ''}${Number.isFinite(res.err) ? ' · err ' + (100 * res.err).toFixed(0) + '%' : ''}`; }
-      else st.status = !res ? 'keyframe left the window before its depth arrived' : `only ${res.n} features on this keyframe`;
-    }
-  } catch (e) { console.error('DA3 run failed', e); st.status = 'run error: ' + (e.message || e); }
-  finally { if (src instanceof HTMLCanvasElement) releaseHi(src); }
-  st.ms = performance.now() - t0; st.busy = false; st.lastRun = performance.now();
-}
-// full-resolution copies of camera frames for DA3 (GPU-side drawImage, no readback)
-const hiPool = [];
-function grabHi() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  let c = hiPool.pop();
-  if (!c || c.width !== vw || c.height !== vh) { c = document.createElement('canvas'); c.width = vw; c.height = vh; }
-  c.getContext('2d').drawImage(video, 0, 0, vw, vh);
-  return c;
-}
-function releaseHi(c) { if (c && hiPool.length < 4 && !hiPool.includes(c)) hiPool.push(c); }
+async function loadDA3() { S.da3.loading = true; await request({ type: 'da3load' }); }
+function releaseHi(c) { if (c && typeof c.close === 'function') c.close(); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ------------------------------------------------------------------ benchmark
 const LS_BENCH = 'pocketvio.bench.v1';
 S.bench = lsGet(LS_BENCH);
 async function benchmarkDA3(onRows) {
-  const st = S.da3, eng = st.eng;
-  if (!eng) throw new Error('install DA3 first');
-  while (st.busy) await sleep(50);
-  st.busy = true;
-  try {
-    const src = S.mode !== 'idle' && video.videoWidth ? grabHi() : S.pctx ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(480, 640);
-    const cfgs = eng.fixedW ? [[eng.fixedW, 'fixed']] : [[280, 'square'], [392, 'square'], [504, 'square'], [504, 'aspect']];
-    const rows = [];
-    for (const [size, fit] of cfgs) {
-      st.status = `benchmark ${size} ${fit}…`;
-      const t0 = performance.now();
-      const first = await withTimeout(inferDepth(src, { size, fit }), 120000, 'benchmark run');
-      const firstMs = performance.now() - t0, times = [], totals = [];
-      for (let i = 0; i < 5; i++) { const r = await inferDepth(src, { size, fit }); times.push(r.ms); totals.push(r.totalMs); }
-      rows.push({ size, fit: first.fit, inW: first.inW, inH: first.inH, outW: first.dw, outH: first.dh, firstMs: Math.round(firstMs), medMs: Math.round(VIO.median(times)), minMs: Math.round(Math.min(...times)), totalMs: Math.round(VIO.median(totals)) });
-      onRows && onRows(rows);
-    }
-    if (src instanceof HTMLCanvasElement) releaseHi(src);
-    S.bench = { date: new Date().toISOString(), backend: eng.be, file: eng.file, adapter: st.adapterInfo || '', ua: navigator.userAgent, rows };
-    lsSet(LS_BENCH, S.bench);
-    dlog('benchmark: ' + rows.map(r => `${r.inW}×${r.inH} ${r.medMs}ms`).join(', '));
-    st.status = `ready · ${eng.be} · ${eng.file} · ${SET.da3Size} ${SET.da3Fit}`;
-    return rows;
-  } finally { st.busy = false; }
+  S.benchOnRows = onRows;
+  const r = await request({ type: 'da3bench' });
+  S.benchOnRows = null;
+  if (r.error) throw new Error(r.error);
+  S.bench = { date: new Date().toISOString(), backend: r.backend, file: r.file, adapter: r.adapter || '', ua: navigator.userAgent, rows: r.rows };
+  lsSet(LS_BENCH, S.bench);
+  return r.rows;
 }
 function renderBench(rows) {
   const el = $('benchTable');
@@ -2062,7 +2198,7 @@ function renderBench(rows) {
 }
 $('benchTable').addEventListener('click', e => {
   const i = e.target.dataset && e.target.dataset.use; if (i == null || !S.bench) return;
-  const r = S.bench.rows[+i]; SET.da3Size = r.size; SET.da3Fit = r.fit === 'fixed' ? SET.da3Fit : r.fit; saveSettings(); renderSettings(); renderBench(S.bench.rows);
+  const r = S.bench.rows[+i]; SET.da3Size = r.size; SET.da3Fit = r.fit === 'fixed' ? SET.da3Fit : r.fit; saveSettings(); renderSettings(); renderBench(S.bench.rows); sendDa3Cfg(false);
 });
 
 // ------------------------------------------------------------------ IMU rest check
@@ -2185,7 +2321,7 @@ $('ss_bench').addEventListener('click', async () => {
     const rows = await benchmarkDA3(renderBench);
     const fit = rows.filter(r => r.medMs <= SET.da3Budget).sort((a, b) => b.inW * b.inH - a.inW * a.inH || (a.fit === 'square' ? -1 : 1));
     const pick = fit[0] || rows.reduce((a, b) => a.medMs <= b.medMs ? a : b);
-    SET.da3Size = pick.size; if (pick.fit !== 'fixed') SET.da3Fit = pick.fit; saveSettings(); renderSettings(); renderBench(rows);
+    SET.da3Size = pick.size; if (pick.fit !== 'fixed') SET.da3Fit = pick.fit; saveSettings(); renderSettings(); renderBench(rows); sendDa3Cfg(false);
     stepState('bench', 'ok', `selected ${pick.inW}×${pick.inH} (${pick.medMs} ms, budget ${SET.da3Budget} ms). Tap Use on another row to change.`);
   } catch (e) { stepState('bench', 'fail', e.message); }
 });
@@ -2201,7 +2337,7 @@ $('ss_imu').addEventListener('click', async () => {
   stepState('imu', 'running', 'lay the phone flat on a table and don\'t touch it (3 s)…');
   try {
     const r = await imuRestCheck(3); S.imuCheck = r;
-    if (r.still) { lsSet(LS_IMU, { bg: r.bg, date: new Date().toISOString() }); S.est.p.initBg = r.bg; }
+    if (r.still) { lsSet(LS_IMU, { bg: r.bg, date: new Date().toISOString() }); setEstParam('initBg', r.bg); }
     $('ss_imuApply').hidden = !r.still;
     stepState('imu', r.still ? 'ok' : 'fail', `${r.rate.toFixed(0)} Hz · gyro bias ${r.bg.map(v => v.toFixed(4)).join(' ')} rad/s · gyro σ ${r.gStd.toFixed(4)} · accel σ ${r.aStd.toFixed(3)} · |g| ${r.gNorm.toFixed(3)}` +
       (r.still ? ` · suggested noise: gyro ${r.ngSug.toPrecision(2)}, accel ${r.naSug.toPrecision(2)} (current ${SET.ng}, ${SET.na})` : ' — phone moved, retry'));
@@ -2209,7 +2345,7 @@ $('ss_imu').addEventListener('click', async () => {
 });
 $('ss_imuApply').addEventListener('click', () => {
   const r = S.imuCheck; if (!r) return;
-  SET.ng = +r.ngSug.toPrecision(2); SET.na = +r.naSug.toPrecision(2); S.est.p.ng = SET.ng; S.est.p.na = SET.na; saveSettings(); renderSettings();
+  SET.ng = +r.ngSug.toPrecision(2); SET.na = +r.naSug.toPrecision(2); setEstParam('ng', SET.ng); setEstParam('na', SET.na); saveSettings(); renderSettings();
   $('ss_imuApply').hidden = true; stepState('imu', 'ok', SETUP.steps.imu.text + ' · applied');
 });
 $('ss_scale').addEventListener('click', () => { stepState('scale', 'ok', 'Use the Walk scale test card to log measured walks.'); $('walkCard').scrollIntoView({ behavior: 'smooth' }); });
@@ -2226,8 +2362,8 @@ function download(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-$('eTum').addEventListener('click', () => {
-  const tr = S.est.traj;
+$('eTum').addEventListener('click', async () => {
+  const tr = (await request({ type: 'export' })).traj;
   if (!tr.length) { setHint('Nothing to export yet.', 'warn'); return; }
   const lines = ['# Pocket VIO keyframe trajectory (TUM): timestamp x y z qx qy qz qw — IMU/device frame in world (z up)'];
   for (const e of tr) {
@@ -2236,8 +2372,8 @@ $('eTum').addEventListener('click', () => {
   }
   download(`pocketvio_traj_${stamp()}.txt`, lines.join('\n') + '\n');
 });
-$('ePly').addEventListener('click', () => {
-  const pts = S.est.mapPts.concat(S.est.windowLandmarks());
+$('ePly').addEventListener('click', async () => {
+  const pts = (await request({ type: 'export' })).pts;
   if (!pts.length) { setHint('No map points yet.', 'warn'); return; }
   const head = ['ply', 'format ascii 1.0', 'comment Pocket VIO map points (world, z up, metres)', `element vertex ${pts.length}`, 'property float x', 'property float y', 'property float z', 'end_header'];
   download(`pocketvio_map_${stamp()}.ply`, head.join('\n') + '\n' + pts.map(p => p.map(v => v.toFixed(4)).join(' ')).join('\n') + '\n');
@@ -2256,11 +2392,10 @@ function fitCanvas(cv) {
 function drawView(tracks) {
   const cv = $('view'); fitCanvas(cv);
   const ctx = cv.getContext('2d'), w = cv.width, h = cv.height;
-  ctx.drawImage(video, 0, 0, w, h);
+  ctx.clearRect(0, 0, w, h);
   const s = w / S.W, r = Math.max(2, 2.2 * (window.devicePixelRatio || 1));
   for (const q of tracks) {
-    const f = S.est.feats.get(q.id);
-    ctx.fillStyle = f && f.lm ? (f.prior ? C.da3 : C.lm) : C.warn;
+    ctx.fillStyle = q.flag === 2 ? C.da3 : q.flag === 1 ? C.lm : C.warn;
     ctx.beginPath(); ctx.arc(q.x * s, q.y * s, r, 0, 6.2832); ctx.fill();
   }
 }
@@ -2353,13 +2488,13 @@ const RO = [
   ['IMU rate', () => `${f2(S.imuRate, 0)} Hz · ${S.imuSrc}`],
   ['tracks', () => String(S.lastTracks.length)],
   ['landmarks', () => `${S.est.nLm || 0} win · ${S.est.mapPts.length} map`],
-  ['keyframes', () => `${S.est.kfs.length} win · ${S.est.traj.length} total`],
+  ['keyframes', () => `${S.est.kfs.length} win · ${S.est.nTraj || S.est.traj.length} total`],
   ['solve', () => `${f2(S.est.solveMs, 0)} ms · ${S.est.lastIters || 0} it`],
   ['position (m)', () => S.est.pose ? vec(S.est.pose.p) : '–'],
   ['speed', () => S.est.pose ? f2(norm3(S.est.pose.v)) + ' m/s' : '–'],
   ['path length', () => f2(S.est.pathLength()) + ' m'],
-  ['gyro bias (rad/s)', () => vec(S.est.kfs.length ? S.est.kfs[S.est.kfs.length - 1].bg : S.est.bias(), 3)],
-  ['accel bias (m/s²)', () => S.est.kfs.length ? vec(S.est.kfs[S.est.kfs.length - 1].ba, 2) : '–'],
+  ['gyro bias (rad/s)', () => vec(S.est.lastBg || S.est.bias(), 3)],
+  ['accel bias (m/s²)', () => S.est.lastBa ? vec(S.est.lastBa, 2) : '–'],
   ['FOV / td / offset', () => `${f2(SET.fov, 1)}° / ${SET.td} ms / ${SET.camOffset}°`],
   ['DA3', () => S.da3.status + (S.da3.ms ? ` · ${f2(S.da3.ms, 0)}ms` : ''), true],
   ['DA3 in solver', () => { const n = S.est.da3Stats(); return `${n.withPrior} landmarks with prior · ${n.fromDA3} initialized by DA3 · ${S.da3.aligned || 0}/${S.da3.runs || 0} maps aligned`; }, true],
@@ -2418,16 +2553,17 @@ $('settings').addEventListener('change', e => {
 });
 function applySetting(sc) {
   const [k, , , , , to] = sc;
-  if (to === 'est') { S.est.p[k] = k === 'td' ? SET.td / 1000 : SET[k]; }
-  else if (to === 'trk') { Object.assign(S.trk.p, trkParams()); if (k === 'levels' || k === 'win') S.trk.reset(); }
+  if (to === 'est') { setEstParam(k, k === 'td' ? SET.td / 1000 : SET[k]); }
+  else if (to === 'trk') { W_.postMessage({ type: 'trkParams', params: trkParams(), reset: k === 'levels' || k === 'win' }); }
   else if (to === 'cam') { if (k === 'procSize') S.proc = null; else updateCamera(); if (S.mode === 'running') reinit('camera setting changed'); }
   else if (k === 'imuFreq' && S.mode !== 'idle') { stopSensors(); startSensors(); }
-  else if (k.startsWith('da3') && !['da3Size', 'da3Fit', 'da3Budget'].includes(k)) { S.da3.ready = false; S.da3.eng = null; if (S.da3.on && !S.da3.loading) loadDA3(); }
+  else if (k === 'usePredict') sendMode(false);
+  else if (k.startsWith('da3')) sendDa3Cfg(['da3Model', 'da3File', 'da3Backend'].includes(k) && (S.da3.ready || S.da3.loading));
 }
 $('sDefaults').addEventListener('click', () => {
   for (const s of SCHEMA) SET[s[0]] = s[3];
   saveSettings(); lsSet(LS_CAL, { fov: SET.fov, td: SET.td, camOffset: SET.camOffset }); renderSettings();
-  S.est = newEstimator(); S.trk = new Tracker(trkParams()); S.proc = null;
+  initEstimator(); S.proc = null;
 });
 renderSettings();
 
