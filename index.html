@@ -625,7 +625,11 @@ class Estimator {
       // one pipeline, whether the phone is still or moving: the first frame with enough
       // features becomes keyframe 0; DA3 seeds its depths and the window solves the rest
       if (tracks.length < p.initTracks) { this.initWhy = `${tracks.length}/${p.initTracks} features — point at texture`; return out; }
-      if (this.imu.range(t - 0.3, t).length < 10) { this.initWhy = 'waiting for IMU data'; return out; }
+      if (this.imu.range(t - 0.3, t).length < 10) {
+        const gap = this.imu.length ? t - this.imu.lastT() : NaN;
+        this.initWhy = !this.imu.length ? 'no IMU samples have arrived' : Math.abs(gap) > 1 ? `IMU and camera clocks differ by ${gap.toFixed(1)} s` : 'waiting for IMU data';
+        return out;
+      }
       this.initialize(t, tracks); out.kf = true;
       return out;
     }
@@ -1925,6 +1929,28 @@ async function diagnose(prefix) {
   $('diag').textContent = parts.join('\n');
 }
 
+// ------------------------------------------------------------------ clocks
+// Sensor and camera timestamps should both be on the performance.now() timeline, but some
+// Android builds stamp them from another clock (e.g. time since boot). Each source is checked
+// against its arrival time; if it is off by more than 1 s it is mapped onto performance.now()
+// using the smallest observed delivery delay (the latency floor).
+class ClockMap {
+  constructor(name) { this.name = name; this.d = []; this.mode = 'unknown'; this.off = 0; this.n = 0; }
+  map(tsMs, nowMs) {
+    const d = nowMs - tsMs;
+    this.d.push(d); if (this.d.length > 300) this.d.shift();
+    if (++this.n % 25 === 0 || this.mode === 'unknown') {
+      const med = VIO.median(this.d);
+      this.mode = Math.abs(med) < 1000 ? 'same clock' : 'remapped';
+      this.off = Math.min(...this.d);
+      this.med = med;
+    }
+    return this.mode === 'remapped' ? tsMs + this.off : tsMs;
+  }
+  describe() { return this.n ? `${this.mode} (Δ ${this.med >= 0 ? '+' : ''}${(this.med / 1000).toFixed(this.mode === 'remapped' ? 1 : 3)} s)` : 'no data'; }
+}
+S.clk = { imu: new ClockMap('imu'), cam: new ClockMap('camera') };
+
 // ------------------------------------------------------------------ IMU
 function pushImu(t, w, a) {
   S.est.imu.push(t, w, a);
@@ -1937,7 +1963,7 @@ function onDeviceMotion(e) {
   const r = e.rotationRate, a = e.accelerationIncludingGravity;
   if (!r || !a || r.alpha == null || a.x == null) return;
   const d = Math.PI / 180; // rotationRate is deg/s: alpha = z, beta = x, gamma = y
-  pushImu(e.timeStamp / 1000, [r.beta * d, r.gamma * d, r.alpha * d], [a.x, a.y, a.z]);
+  pushImu(S.clk.imu.map(e.timeStamp, performance.now()) / 1000, [r.beta * d, r.gamma * d, r.alpha * d], [a.x, a.y, a.z]);
 }
 function useDeviceMotion(why) {
   if (S.dm) return;
@@ -1957,7 +1983,7 @@ function startSensors() {
     const acc = new Accelerometer({ frequency: f, referenceFrame: 'device' });
     let lastA = null;
     acc.addEventListener('reading', () => { lastA = [acc.x, acc.y, acc.z]; });
-    g.addEventListener('reading', () => { if (lastA && g.timestamp != null) pushImu(g.timestamp / 1000, [g.x, g.y, g.z], lastA); });
+    g.addEventListener('reading', () => { if (lastA && g.timestamp != null) pushImu(S.clk.imu.map(g.timestamp, performance.now()) / 1000, [g.x, g.y, g.z], lastA); });
     const onErr = e => useDeviceMotion((e.error && (e.error.name + ': ' + e.error.message)) || 'sensor error');
     g.addEventListener('error', onErr); acc.addEventListener('error', onErr);
     g.start(); acc.start();
@@ -2088,8 +2114,8 @@ async function grabFrame(tCam) {
 function onVideoFrame(nowMs, meta) {
   if (S.mode === 'idle') return;
   video.requestVideoFrameCallback(onVideoFrame);
-  const t = (meta && (meta.captureTime || meta.expectedDisplayTime)) || nowMs;
-  grabFrame(t / 1000);
+  const raw = (meta && (meta.captureTime || meta.expectedDisplayTime)) || nowMs;
+  grabFrame(S.clk.cam.map(raw, performance.now()) / 1000);
 }
 let lastVT = -1;
 function rafFrame(nowMs) {
@@ -2303,7 +2329,7 @@ $('ss_sensors').addEventListener('click', () => {
       : S.imuCount === 0 ? `IMU ✗ no readings (source: ${S.imuSrc})` : `IMU ✗ only ${S.imuRate.toFixed(0)} Hz via ${S.imuSrc} (need ≥ 30)`;
     let diag = '';
     if (!(camOk && imuOk)) { await diagnose('Sensor check:'); diag = '\n' + $('diag').textContent; }
-    stepState('sensors', camOk && imuOk ? 'ok' : 'fail', `${cam}\n${imu}${diag}`);
+    stepState('sensors', camOk && imuOk ? 'ok' : 'fail', `${cam}\n${imu}\nclocks: IMU ${S.clk.imu.describe()} · camera ${S.clk.cam.describe()}${diag}`);
   });
 });
 $('ss_da3').addEventListener('click', async () => {
@@ -2486,6 +2512,7 @@ const vec = (v, n = 2) => v ? v.map(x => f2(x, n)).join(' ') : '–';
 const RO = [
   ['fps', () => f2(S.fps, 1) + ` · klt ${f2(S.trackMs, 0)}ms`],
   ['IMU rate', () => `${f2(S.imuRate, 0)} Hz · ${S.imuSrc}`],
+  ['clocks', () => `IMU ${S.clk.imu.describe()} · camera ${S.clk.cam.describe()}`, true],
   ['tracks', () => String(S.lastTracks.length)],
   ['landmarks', () => `${S.est.nLm || 0} win · ${S.est.mapPts.length} map`],
   ['keyframes', () => `${S.est.kfs.length} win · ${S.est.nTraj || S.est.traj.length} total`],
