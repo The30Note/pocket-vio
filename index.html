@@ -1,0 +1,1767 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f5f2" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121412" media="(prefers-color-scheme: dark)">
+<title>Pocket VIO</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #f4f5f2; --surface: #ffffff; --surface-2: #eceee9; --border: #d9dcd4;
+  --text: #171a16; --muted: #626a5f; --accent: #2f6fdf; --accent-ink: #ffffff;
+  --ok: #1c9a5a; --warn: #d98a00; --bad: #d23f3f; --grid: rgba(23, 26, 22, .10);
+  --traj: #2f6fdf; --lm: #1c9a5a; --pts: rgba(70, 76, 68, .55); --frustum: #d23f3f;
+  --radius: 14px; --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.05);
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121412; --surface: #1b1e1b; --surface-2: #232723; --border: #313631;
+    --text: #e9ece6; --muted: #9aa396; --accent: #6b9cff; --accent-ink: #0d1530;
+    --ok: #3ccf84; --warn: #ffb020; --bad: #ff6b6b; --grid: rgba(233, 236, 230, .10);
+    --traj: #6b9cff; --lm: #3ccf84; --pts: rgba(200, 206, 196, .5); --frustum: #ff6b6b;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121412; --surface: #1b1e1b; --surface-2: #232723; --border: #313631;
+  --text: #e9ece6; --muted: #9aa396; --accent: #6b9cff; --accent-ink: #0d1530;
+  --ok: #3ccf84; --warn: #ffb020; --bad: #ff6b6b; --grid: rgba(233, 236, 230, .10);
+  --traj: #6b9cff; --lm: #3ccf84; --pts: rgba(200, 206, 196, .5); --frustum: #ff6b6b;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); }
+body { font: 15px/1.45 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+main { max-width: 760px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 12px; }
+header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between;
+  max-width: 760px; margin: 0 auto; padding: 12px 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
+.brand small { font-weight: 500; color: var(--muted); font-size: 12px; }
+.logo { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); position: relative; }
+.logo::after { content: ""; position: absolute; inset: 6px; border: 2px solid var(--accent-ink); border-radius: 50%; }
+.chip { font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; padding: 7px 10px; border-radius: 999px;
+  background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 6px; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.warmup { color: var(--warn); } .chip.calibrating { color: var(--accent); } .chip.tracking { color: var(--ok); }
+.chip.tracking::before, .chip.warmup::before, .chip.calibrating::before { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.cam { position: relative; display: grid; place-items: center; background: #000; }
+#view { display: block; width: 100%; max-height: 46vh; aspect-ratio: 3 / 4; object-fit: contain; }
+.cam .legend { position: absolute; left: 10px; bottom: 10px; display: flex; gap: 10px; font: 500 11px/1 var(--mono);
+  color: #fff; background: rgba(0,0,0,.45); padding: 6px 8px; border-radius: 8px; }
+.cam .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+.cam .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #b9beb5; font-size: 14px; text-align: center; padding: 16px; }
+#video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.hint { border-radius: var(--radius); padding: 10px 14px; background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); font-size: 14px; }
+.hint.warn { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+.hint.bad { background: color-mix(in srgb, var(--bad) 12%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+.controls { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+button { font: 600 14px/1 Inter, system-ui, sans-serif; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 11px; padding: 12px 6px; min-height: 44px; cursor: pointer; touch-action: manipulation; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 18%, var(--surface)); border-color: var(--accent); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toggle { display: flex; align-items: center; gap: 10px; padding: 10px 14px; font-weight: 500; }
+.toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
+.toggle .sub { color: var(--muted); font: 12px/1.3 var(--mono); margin-left: auto; text-align: right; }
+.exportbox { display: none; padding: 10px; gap: 8px; grid-template-columns: 1fr 1fr; }
+.exportbox.open { display: grid; }
+.map { position: relative; }
+#map { display: block; width: 100%; height: 44vh; min-height: 260px; touch-action: none; background: var(--surface-2); }
+.mapbtns { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; }
+.mapbtns button { min-height: 34px; padding: 8px 10px; font-size: 12px; border-radius: 9px; background: color-mix(in srgb, var(--surface) 90%, transparent); }
+.maplegend { position: absolute; left: 10px; bottom: 8px; font: 11px/1.4 var(--mono); color: var(--muted); }
+.readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1px; background: var(--border); }
+.ro { background: var(--surface); padding: 9px 12px; min-width: 0; }
+.ro b { display: block; font: 500 11px/1.2 Inter, sans-serif; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.ro span { display: block; font: 500 14px/1.35 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
+.sgroup { padding: 4px 14px 10px; }
+.sgroup h4 { margin: 10px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.srow { display: grid; grid-template-columns: 1fr 120px; gap: 10px; align-items: center; padding: 5px 0; border-top: 1px dashed var(--border); font-size: 13px; }
+.srow input { width: 100%; font: 13px var(--mono); padding: 7px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
+.srow.wide { grid-template-columns: 1fr; }
+.diag { font: 12px/1.5 var(--mono); color: var(--muted); word-break: break-word; white-space: pre-wrap; }
+.diag:empty { display: none; }
+.foot { color: var(--muted); font-size: 12px; }
+@media (max-width: 420px) { .controls button { font-size: 13px; padding: 10px 2px; } }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true"></span>Pocket VIO <small>monocular VIO</small></div>
+  <span id="chip" class="chip idle">idle</span>
+</header>
+<main>
+  <section class="card cam">
+    <canvas id="view" width="270" height="360"></canvas>
+    <div class="empty" id="camEmpty">Back camera preview appears here</div>
+    <div class="legend"><span><i style="background:var(--lm)"></i>landmark</span><span><i style="background:var(--warn)"></i>track</span></div>
+    <video id="video" playsinline muted autoplay></video>
+  </section>
+  <div id="hint" class="hint">Tap <b>Start</b>, then hold the phone still for a second, pointed at a textured scene.</div>
+  <div class="controls">
+    <button id="bStart" class="primary">Start</button>
+    <button id="bReinit" disabled>Re-init</button>
+    <button id="bCalib" disabled>Calibrate</button>
+    <button id="bExport">Export</button>
+    <button id="bStop" disabled>Stop</button>
+  </div>
+  <div class="card exportbox" id="exportBox">
+    <button id="eTum">Trajectory (TUM .txt)</button>
+    <button id="ePly">Map points (PLY)</button>
+  </div>
+  <label class="card toggle"><input type="checkbox" id="da3"> DA3 depth prior <span class="sub" id="da3Status">off</span></label>
+  <section class="card map">
+    <canvas id="map"></canvas>
+    <div class="mapbtns">
+      <button id="mFollow" aria-pressed="true">Follow</button>
+      <button id="mTop" aria-pressed="false">Top</button>
+      <button id="mFit">Fit</button>
+    </div>
+    <div class="maplegend" id="mapLegend">grid 1 m · z up</div>
+  </section>
+  <section class="card readouts" id="ro"></section>
+  <details class="card settings">
+    <summary>Settings</summary>
+    <div id="settings"></div>
+    <div class="sgroup row"><button id="sDefaults">Reset to defaults</button><span class="foot">Changes apply live; camera/geometry changes re-initialize.</span></div>
+  </details>
+  <div class="diag" id="diag"></div>
+  <p class="foot">Runs entirely on-device. Needs HTTPS (or http://localhost). Coordinates: world z up, gravity −z, initial yaw 0. Exported poses are the IMU (device) frame.</p>
+</main>
+
+<script id="vio-core">
+/* ==========================================================================
+   Pocket VIO core: math, IMU preintegration, KLT front end, sliding-window
+   VIO back end, camera calibration search.  No DOM access in here, so the
+   same code runs in Node for the synthetic verification (test/sim.mjs).
+   ========================================================================== */
+const VIO = (() => {
+'use strict';
+const GRAV = 9.81;
+const GVEC = [0, 0, -GRAV];
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+// ---------------------------------------------------------------- vectors
+const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const scl3 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const norm3 = a => Math.hypot(a[0], a[1], a[2]);
+
+// ------------------------------------------------- 3x3 matrices, row-major
+const I3 = () => [1, 0, 0, 0, 1, 0, 0, 0, 1];
+function mm(A, B) {
+  const C = new Array(9);
+  for (let i = 0; i < 3; i++) {
+    const a0 = A[3 * i], a1 = A[3 * i + 1], a2 = A[3 * i + 2];
+    C[3 * i] = a0 * B[0] + a1 * B[3] + a2 * B[6];
+    C[3 * i + 1] = a0 * B[1] + a1 * B[4] + a2 * B[7];
+    C[3 * i + 2] = a0 * B[2] + a1 * B[5] + a2 * B[8];
+  }
+  return C;
+}
+function mtm(A, B) { // A^T B
+  const C = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+    C[3 * i + j] = A[i] * B[j] + A[3 + i] * B[3 + j] + A[6 + i] * B[6 + j];
+  return C;
+}
+function mmt(A, B) { // A B^T
+  const C = new Array(9);
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++)
+    C[3 * i + j] = A[3 * i] * B[3 * j] + A[3 * i + 1] * B[3 * j + 1] + A[3 * i + 2] * B[3 * j + 2];
+  return C;
+}
+const mv = (A, x) => [A[0] * x[0] + A[1] * x[1] + A[2] * x[2], A[3] * x[0] + A[4] * x[1] + A[5] * x[2], A[6] * x[0] + A[7] * x[1] + A[8] * x[2]];
+const mtv = (A, x) => [A[0] * x[0] + A[3] * x[1] + A[6] * x[2], A[1] * x[0] + A[4] * x[1] + A[7] * x[2], A[2] * x[0] + A[5] * x[1] + A[8] * x[2]];
+const madd = (A, B) => A.map((a, i) => a + B[i]);
+const msub = (A, B) => A.map((a, i) => a - B[i]);
+const mscl = (A, s) => A.map(a => a * s);
+const tr3 = A => [A[0], A[3], A[6], A[1], A[4], A[7], A[2], A[5], A[8]];
+const skew = w => [0, -w[2], w[1], w[2], 0, -w[0], -w[1], w[0], 0];
+
+function expSO3(w) {
+  const t2 = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
+  let a, b;
+  if (t2 < 1e-12) { a = 1 - t2 / 6; b = 0.5 - t2 / 24; }
+  else { const t = Math.sqrt(t2); a = Math.sin(t) / t; b = (1 - Math.cos(t)) / t2; }
+  // R = I + a K + b K^2,  K^2 = w w^T - |w|^2 I
+  const x = w[0], y = w[1], z = w[2];
+  return [
+    1 + b * (x * x - t2), -a * z + b * x * y, a * y + b * x * z,
+    a * z + b * x * y, 1 + b * (y * y - t2), -a * x + b * y * z,
+    -a * y + b * x * z, a * x + b * y * z, 1 + b * (z * z - t2)];
+}
+function logSO3(R) {
+  const c = Math.min(1, Math.max(-1, (R[0] + R[4] + R[8] - 1) / 2));
+  const t = Math.acos(c);
+  const v = [R[7] - R[5], R[2] - R[6], R[3] - R[1]];
+  if (t < 1e-5) return scl3(v, 0.5 * (1 + t * t / 6));
+  if (t > Math.PI - 1e-4) {
+    let k = 0; if (R[4] > R[0]) k = 1; if (R[8] > R[3 * k + k]) k = 2;
+    const s = Math.sqrt(Math.max(1e-12, 2 * (1 + R[3 * k + k])));
+    const n = [R[k] / s, R[3 + k] / s, R[6 + k] / s]; n[k] = (R[3 * k + k] + 1) / s;
+    const nn = norm3(n); return scl3(n, t / nn);
+  }
+  return scl3(v, t / (2 * Math.sin(t)));
+}
+function rightJ(w) {
+  const t2 = dot3(w, w), K = skew(w), K2 = mm(K, K);
+  let a, b;
+  if (t2 < 1e-10) { a = 0.5; b = 1 / 6; }
+  else { const t = Math.sqrt(t2); a = (1 - Math.cos(t)) / t2; b = (t - Math.sin(t)) / (t2 * t); }
+  return madd(msub(I3(), mscl(K, a)), mscl(K2, b));
+}
+function quatFromR(R) { // returns [x,y,z,w]
+  const t = R[0] + R[4] + R[8];
+  let x, y, z, w, s;
+  if (t > 0) { s = Math.sqrt(t + 1) * 2; w = 0.25 * s; x = (R[7] - R[5]) / s; y = (R[2] - R[6]) / s; z = (R[3] - R[1]) / s; }
+  else if (R[0] > R[4] && R[0] > R[8]) { s = Math.sqrt(1 + R[0] - R[4] - R[8]) * 2; w = (R[7] - R[5]) / s; x = 0.25 * s; y = (R[1] + R[3]) / s; z = (R[2] + R[6]) / s; }
+  else if (R[4] > R[8]) { s = Math.sqrt(1 + R[4] - R[0] - R[8]) * 2; w = (R[2] - R[6]) / s; x = (R[1] + R[3]) / s; y = 0.25 * s; z = (R[5] + R[7]) / s; }
+  else { s = Math.sqrt(1 + R[8] - R[0] - R[4]) * 2; w = (R[3] - R[1]) / s; x = (R[2] + R[6]) / s; y = (R[5] + R[7]) / s; z = 0.25 * s; }
+  const n = Math.hypot(x, y, z, w) * (w < 0 ? -1 : 1);
+  return [x / n, y / n, z / n, w / n];
+}
+function RfromQuat(q) {
+  const [x, y, z, w] = q;
+  return [
+    1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w),
+    2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w),
+    2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)];
+}
+const orthoR = R => RfromQuat(quatFromR(R));
+const Rx = a => { const c = Math.cos(a), s = Math.sin(a); return [1, 0, 0, 0, c, -s, 0, s, c]; };
+const Ry = a => { const c = Math.cos(a), s = Math.sin(a); return [c, 0, s, 0, 1, 0, -s, 0, c]; };
+const Rz = a => { const c = Math.cos(a), s = Math.sin(a); return [c, -s, 0, s, c, 0, 0, 0, 1]; };
+
+// ------------------------------------------------------- dense linear alg
+function cholesky(A, n) { // in place: lower triangle becomes L. false if not PD
+  for (let j = 0; j < n; j++) {
+    const rj = j * n;
+    let s = A[rj + j];
+    for (let k = 0; k < j; k++) s -= A[rj + k] * A[rj + k];
+    if (!(s > 0)) return false;
+    const d = Math.sqrt(s); A[rj + j] = d;
+    for (let i = j + 1; i < n; i++) {
+      const ri = i * n;
+      let t = A[ri + j];
+      for (let k = 0; k < j; k++) t -= A[ri + k] * A[rj + k];
+      A[ri + j] = t / d;
+    }
+  }
+  return true;
+}
+function cholSolve(L, b, n) {
+  const x = Float64Array.from(b);
+  for (let i = 0; i < n; i++) { let s = x[i]; for (let k = 0; k < i; k++) s -= L[i * n + k] * x[k]; x[i] = s / L[i * n + i]; }
+  for (let i = n - 1; i >= 0; i--) { let s = x[i]; for (let k = i + 1; k < n; k++) s -= L[k * n + i] * x[k]; x[i] = s / L[i * n + i]; }
+  return x;
+}
+function median(a) {
+  if (!a.length) return 0;
+  const s = Float64Array.from(a).sort(); const m = s.length >> 1;
+  return s.length & 1 ? s[m] : 0.5 * (s[m - 1] + s[m]);
+}
+
+// ------------------------------------------------------------- camera
+// theta = screen.orientation.angle + user offset (degrees). Columns of R_bc
+// are the camera axes expressed in the device (IMU/body) frame.
+function makeCam(W, H, fovDeg, thetaDeg) {
+  const th = thetaDeg * Math.PI / 180, c = Math.cos(th), s = Math.sin(th);
+  const L = Math.max(W, H);
+  const f = (L / 2) / Math.tan(fovDeg * Math.PI / 360);
+  const Rbc = [c, -s, 0, -s, -c, 0, 0, 0, -1];
+  return {
+    W, H, f, cx: W / 2, cy: H / 2, fov: fovDeg, theta: thetaDeg, Rbc,
+    bearing(u, v) { return [(u - this.cx) / this.f, (v - this.cy) / this.f, 1]; },
+    project(X) { return [this.f * X[0] / X[2] + this.cx, this.f * X[1] / X[2] + this.cy]; },
+  };
+}
+
+// ------------------------------------------------------------- IMU buffer
+class ImuBuf {
+  constructor() { this.a = []; }
+  push(t, w, a) {
+    const A = this.a;
+    if (A.length && t <= A[A.length - 1].t) return false;
+    A.push({ t, w, a }); return true;
+  }
+  get length() { return this.a.length; }
+  lastT() { return this.a.length ? this.a[this.a.length - 1].t : -Infinity; }
+  firstT() { return this.a.length ? this.a[0].t : Infinity; }
+  trimBefore(t) {
+    const A = this.a; let k = 0;
+    while (k < A.length - 2 && A[k + 1].t < t) k++;
+    if (k > 0) A.splice(0, k);
+  }
+  idx(t) { // largest i with A[i].t <= t, or -1
+    const A = this.a; let lo = -1, hi = A.length;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (A[m].t <= t) lo = m; else hi = m; }
+    return lo;
+  }
+  interp(t) {
+    const A = this.a, i = this.idx(t);
+    if (i < 0) return A[0];
+    if (i >= A.length - 1) return A[A.length - 1];
+    const s0 = A[i], s1 = A[i + 1], u = (t - s0.t) / (s1.t - s0.t);
+    return { t, w: [s0.w[0] + u * (s1.w[0] - s0.w[0]), s0.w[1] + u * (s1.w[1] - s0.w[1]), s0.w[2] + u * (s1.w[2] - s0.w[2])],
+      a: [s0.a[0] + u * (s1.a[0] - s0.a[0]), s0.a[1] + u * (s1.a[1] - s0.a[1]), s0.a[2] + u * (s1.a[2] - s0.a[2])] };
+  }
+  // Calls cb(w, a, dt) for midpoint-averaged segments covering [t0, t1].
+  segments(t0, t1, cb) {
+    const A = this.a;
+    if (!A.length || !(t1 > t0)) return;
+    const avg = (x, y) => [(x[0] + y[0]) / 2, (x[1] + y[1]) / 2, (x[2] + y[2]) / 2];
+    let tp = t0, sp = this.interp(t0);
+    for (let k = this.idx(t0) + 1; k < A.length && A[k].t < t1; k++) {
+      const s = A[k], dt = s.t - tp;
+      if (dt > 0) cb(avg(sp.w, s.w), avg(sp.a, s.a), dt);
+      tp = s.t; sp = s;
+    }
+    const se = this.interp(t1), dt = t1 - tp;
+    if (dt > 0) cb(avg(sp.w, se.w), avg(sp.a, se.a), dt);
+  }
+  range(t0, t1) { const out = []; for (let k = Math.max(0, this.idx(t0)); k < this.a.length && this.a[k].t <= t1; k++) if (this.a[k].t >= t0) out.push(this.a[k]); return out; }
+}
+
+// ------------------------------------------------ IMU preintegration
+// Forster et al., "On-Manifold Preintegration". Error-state order [phi, v, p].
+class Preint {
+  constructor(bg, ba) {
+    this.bg = bg.slice(); this.ba = ba.slice();
+    this.dR = I3(); this.dv = [0, 0, 0]; this.dp = [0, 0, 0]; this.T = 0;
+    this.cov = new Float64Array(81);
+    this.JRg = [0, 0, 0, 0, 0, 0, 0, 0, 0]; this.JVg = this.JRg.slice(); this.JVa = this.JRg.slice();
+    this.JPg = this.JRg.slice(); this.JPa = this.JRg.slice();
+    this.Linv = null;
+  }
+  step(w, a, dt, ng2, na2) {
+    const wc = sub3(w, this.bg), ac = sub3(a, this.ba);
+    const phi = scl3(wc, dt), dRk = expSO3(phi), Jr = rightJ(phi);
+    const R = this.dR, Ra = mm(R, skew(ac)), dt2 = dt * dt;
+    if (ng2 != null) { // covariance  S = A S A^T + B Q B^T
+      const A = new Float64Array(81);
+      const RkT = tr3(dRk);
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+        A[i * 9 + j] = RkT[3 * i + j];                          // phi-phi
+        A[(3 + i) * 9 + j] = -Ra[3 * i + j] * dt;               // v-phi
+        A[(6 + i) * 9 + j] = -0.5 * Ra[3 * i + j] * dt2;        // p-phi
+      }
+      for (let i = 0; i < 3; i++) { A[(3 + i) * 9 + 3 + i] = 1; A[(6 + i) * 9 + 6 + i] = 1; A[(6 + i) * 9 + 3 + i] = dt; }
+      const S = this.cov, AS = new Float64Array(81), N = new Float64Array(81);
+      for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) {
+        let s = 0; for (let k = 0; k < 9; k++) s += A[i * 9 + k] * S[k * 9 + j]; AS[i * 9 + j] = s;
+      }
+      for (let i = 0; i < 9; i++) for (let j = 0; j < 9; j++) {
+        let s = 0; for (let k = 0; k < 9; k++) s += AS[i * 9 + k] * A[j * 9 + k]; N[i * 9 + j] = s;
+      }
+      for (let i = 0; i < 3; i++) {
+        N[i * 9 + i] += ng2 * dt;
+        N[(3 + i) * 9 + 3 + i] += na2 * dt;
+        N[(6 + i) * 9 + 6 + i] += 0.25 * na2 * dt2 * dt;
+        N[(3 + i) * 9 + 6 + i] += 0.5 * na2 * dt2;
+        N[(6 + i) * 9 + 3 + i] += 0.5 * na2 * dt2;
+      }
+      this.cov = N;
+    }
+    // bias Jacobians (order matters: use previous values)
+    this.JPa = madd(madd(this.JPa, mscl(this.JVa, dt)), mscl(R, -0.5 * dt2));
+    this.JPg = madd(madd(this.JPg, mscl(this.JVg, dt)), mscl(mm(Ra, this.JRg), -0.5 * dt2));
+    this.JVa = madd(this.JVa, mscl(R, -dt));
+    this.JVg = madd(this.JVg, mscl(mm(Ra, this.JRg), -dt));
+    this.JRg = msub(mtm(dRk, this.JRg), mscl(Jr, dt));
+    // deltas
+    const Rac = mv(R, ac);
+    this.dp = add3(add3(this.dp, scl3(this.dv, dt)), scl3(Rac, 0.5 * dt2));
+    this.dv = add3(this.dv, scl3(Rac, dt));
+    this.dR = mm(R, dRk);
+    this.T += dt;
+  }
+  finalize() {
+    const L = Float64Array.from(this.cov);
+    let tr = 0; for (let i = 0; i < 9; i++) tr += L[i * 10];
+    for (let i = 0; i < 9; i++) L[i * 10] += 1e-9 * tr / 9 + 1e-14;
+    if (!cholesky(L, 9)) { this.Linv = null; return; }
+    const Li = new Float64Array(81); // inverse of lower-triangular L
+    for (let c = 0; c < 9; c++) for (let i = c; i < 9; i++) {
+      let s = i === c ? 1 : 0;
+      for (let k = c; k < i; k++) s -= L[i * 9 + k] * Li[k * 9 + c];
+      Li[i * 9 + c] = s / L[i * 9 + i];
+    }
+    this.Linv = Li;
+  }
+  corrected(bg, ba) {
+    const dbg = sub3(bg, this.bg), dba = sub3(ba, this.ba);
+    return {
+      dR: mm(this.dR, expSO3(mv(this.JRg, dbg))),
+      dv: add3(add3(this.dv, mv(this.JVg, dbg)), mv(this.JVa, dba)),
+      dp: add3(add3(this.dp, mv(this.JPg, dbg)), mv(this.JPa, dba)),
+    };
+  }
+  predict(s) { // state at end, given start state s (uses linearization biases)
+    const T = this.T;
+    return {
+      R: mm(s.R, this.dR),
+      v: add3(add3(s.v, scl3(GVEC, T)), mv(s.R, this.dv)),
+      p: add3(add3(add3(s.p, scl3(s.v, T)), scl3(GVEC, 0.5 * T * T)), mv(s.R, this.dp)),
+    };
+  }
+}
+
+// IMU factor residual (15): whitened [rR, rv, rp] + bias random walk
+function imuResidual(pre, si, sj, prm) {
+  const c = pre.corrected(si.bg, si.ba), T = pre.T;
+  const rR = logSO3(mtm(c.dR, mtm(si.R, sj.R)));
+  const dv = sub3(sub3(sj.v, si.v), scl3(GVEC, T));
+  const rv = sub3(mtv(si.R, dv), c.dv);
+  const dp = sub3(sub3(sub3(sj.p, si.p), scl3(si.v, T)), scl3(GVEC, 0.5 * T * T));
+  const rp = sub3(mtv(si.R, dp), c.dp);
+  const r9 = [rR[0], rR[1], rR[2], rv[0], rv[1], rv[2], rp[0], rp[1], rp[2]];
+  const out = new Array(15), L = pre.Linv;
+  for (let i = 0; i < 9; i++) { let s = 0; for (let k = 0; k <= i; k++) s += L[i * 9 + k] * r9[k]; out[i] = s; }
+  const sg = prm.nbg * Math.sqrt(T), sa = prm.nba * Math.sqrt(T);
+  for (let i = 0; i < 3; i++) { out[9 + i] = (sj.bg[i] - si.bg[i]) / sg; out[12 + i] = (sj.ba[i] - si.ba[i]) / sa; }
+  return out;
+}
+
+// reprojection residual (2) in sigma units; landmark = host bearing b / rho
+function reprojResidual(sh, st, b, rho, obs, cam, sigma) {
+  const Rbc = cam.Rbc, iz = 1 / rho;
+  const xc = b[0] * iz, yc = b[1] * iz, zc = iz;
+  const xb = Rbc[0] * xc + Rbc[1] * yc + Rbc[2] * zc;
+  const yb = Rbc[3] * xc + Rbc[4] * yc + Rbc[5] * zc;
+  const zb = Rbc[6] * xc + Rbc[7] * yc + Rbc[8] * zc;
+  const Rh = sh.R, Rt = st.R;
+  const dx = Rh[0] * xb + Rh[1] * yb + Rh[2] * zb + sh.p[0] - st.p[0];
+  const dy = Rh[3] * xb + Rh[4] * yb + Rh[5] * zb + sh.p[1] - st.p[1];
+  const dz = Rh[6] * xb + Rh[7] * yb + Rh[8] * zb + sh.p[2] - st.p[2];
+  const xt = Rt[0] * dx + Rt[3] * dy + Rt[6] * dz;
+  const yt = Rt[1] * dx + Rt[4] * dy + Rt[7] * dz;
+  const zt = Rt[2] * dx + Rt[5] * dy + Rt[8] * dz;
+  const X = Rbc[0] * xt + Rbc[3] * yt + Rbc[6] * zt;
+  const Y = Rbc[1] * xt + Rbc[4] * yt + Rbc[7] * zt;
+  const Z = Rbc[2] * xt + Rbc[5] * yt + Rbc[8] * zt;
+  if (Z < 1e-3) return [60, 60]; // behind camera: constant penalty
+  return [(cam.f * X / Z + cam.cx - obs[0]) / sigma, (cam.f * Y / Z + cam.cy - obs[1]) / sigma];
+}
+
+// right-perturbation of dof k (0-2 rot, 3-5 p, 6-8 v, 9-11 bg, 12-14 ba)
+const EXPS = (() => { const e = 1e-6, o = []; for (let k = 0; k < 3; k++) { const d = [0, 0, 0]; d[k] = e; const m = [0, 0, 0]; m[k] = -e; o.push([expSO3(d), expSO3(m)]); } return o; })();
+const EPS = 1e-6;
+function perturb(s, k, sign) {
+  const n = { R: s.R, p: s.p, v: s.v, bg: s.bg, ba: s.ba };
+  if (k < 3) n.R = mm(s.R, EXPS[k][sign > 0 ? 0 : 1]);
+  else {
+    const key = k < 6 ? 'p' : k < 9 ? 'v' : k < 12 ? 'bg' : 'ba';
+    const a = s[key].slice(); a[k % 3] += sign * EPS; n[key] = a;
+  }
+  return n;
+}
+
+// ======================================================================
+//                               ESTIMATOR
+// ======================================================================
+const DEFAULTS = {
+  ng: 0.004, na: 0.04, nbg: 2e-4, nba: 3e-3,      // noise densities / random walks
+  sigmaPx: 1.5, huber: 2.0, window: 10, lmIters: 6,
+  kfParallax: 10, kfTrackRatio: 0.6, kfMaxDt: 0.45, kfMinDt: 0.08,
+  staticGyro: 0.05, staticAcc: 0.12, staticPx: 1.0,
+  initRest: 1.0, initTracks: 30,
+  minParallaxDeg: 1.0, outlierPx: 5, minDepth: 0.1, maxDepth: 50,
+  priorBg: 0.005, priorBa: 0.1, priorV: 0.2,
+  zuptV: 0.01, zuptP: 0.003, zuptR: 0.003,
+  maxSpeed: 15, maxBg: 0.5, maxBa: 3,
+  reintBg: 0.003, reintBa: 0.05,
+  depthRel: 0.3, td: 0, maxMapPts: 40000,
+};
+
+class Estimator {
+  constructor(params) {
+    this.p = Object.assign({}, DEFAULTS, params || {});
+    this.imu = new ImuBuf();
+    this.cam = null; this.resets = 0;
+    this.reset('start');
+  }
+  setCamera(cam) { this.cam = cam; }
+  reset(reason) {
+    this.status = 'warmup'; this.resetReason = reason || '';
+    this.kfs = []; this.kfById = new Map(); this.feats = new Map();
+    this.depthPriors = new Map(); this.da3 = { maps: 0, mode: '', scale: 0, err: 0, vote: 0 };
+    this.traj = []; this.trajById = new Map(); this.mapPts = [];
+    this.pose = null; this.lastKfObs = new Map(); this.nextKf = 0;
+    this.solveMs = 0; this.lastCost = 0; this.lastIters = 0; this.warm = null; this.lastKfId = -1;
+    this.resets++;
+  }
+  addImu(t, w, a) {
+    if (!this.imu.push(t, w, a)) return;
+    if ((this.imu.length & 63) === 0) {
+      const keep = this.kfs.length ? Math.min(this.kfs[0].t, t - 3) : t - 3;
+      this.imu.trimBefore(keep - 0.5);
+    }
+  }
+  bias() {
+    if (this.kfs.length) return this.kfs[this.kfs.length - 1].bg;
+    return this.warm && this.warm.ok ? this.warm.wMean : [0, 0, 0];
+  }
+  integrate(t0, t1, bg, ba, withCov) {
+    const pre = new Preint(bg, ba), p = this.p;
+    const ng2 = withCov ? p.ng * p.ng : null, na2 = p.na * p.na;
+    this.imu.segments(t0, t1, (w, a, dt) => pre.step(w, a, dt, ng2, na2));
+    if (withCov) pre.finalize();
+    return pre;
+  }
+  // gyro-only rotation between two IMU-timeline instants
+  deltaR(t0, t1, bg) {
+    let R = I3(); bg = bg || this.bias();
+    this.imu.segments(t0, t1, (w, a, dt) => { R = mm(R, expSO3(scl3(sub3(w, bg), dt))); });
+    return R;
+  }
+  deltaRCam(tc0, tc1) { return this.deltaR(tc0 + this.p.td, tc1 + this.p.td); }
+  isLandmark(id) { const f = this.feats.get(id); return !!(f && f.lm); }
+
+  restStats(t) {
+    const p = this.p, S = this.imu.range(t - p.initRest, t);
+    if (S.length < 20 || S[0].t > t - p.initRest + 0.05) return null;
+    let wm = [0, 0, 0], am = [0, 0, 0], an = 0;
+    for (const s of S) { wm = add3(wm, s.w); am = add3(am, s.a); an += norm3(s.a); }
+    wm = scl3(wm, 1 / S.length); am = scl3(am, 1 / S.length); an /= S.length;
+    let gv = 0, av = 0;
+    for (const s of S) { const d = sub3(s.w, wm); gv += dot3(d, d); av += (norm3(s.a) - an) ** 2; }
+    const gstd = Math.sqrt(gv / S.length), astd = Math.sqrt(av / S.length);
+    return { ok: gstd < p.staticGyro && astd < p.staticAcc, wMean: wm, aMean: am, gstd, astd };
+  }
+  isStatic(t0, t1, bg, pxMed) {
+    const p = this.p, S = this.imu.range(t0, t1);
+    if (S.length < 5) return false;
+    let gv = 0, an = 0, av = 0;
+    for (const s of S) { const d = sub3(s.w, bg); gv += dot3(d, d); an += norm3(s.a); }
+    an /= S.length;
+    for (const s of S) av += (norm3(s.a) - an) ** 2;
+    return Math.sqrt(gv / S.length) < p.staticGyro && Math.sqrt(av / S.length) < p.staticAcc && pxMed < p.staticPx;
+  }
+
+  // Main per-frame entry. tc = camera timestamp (s). tracks = [{id,x,y}]
+  addFrame(tc, tracks) {
+    const p = this.p, t = tc + p.td, out = { kf: false, kill: [], reset: null };
+    if (!this.cam) return out;
+    if (this.status === 'warmup') {
+      const rest = this.restStats(t); this.warm = rest;
+      if (rest && rest.ok && tracks.length >= p.initTracks) { this.initialize(t, tracks, rest); out.kf = true; }
+      return out;
+    }
+    const last = this.kfs[this.kfs.length - 1];
+    const pr = this.integrate(last.t, t, last.bg, last.ba, false);
+    const st = pr.predict(last);
+    this.pose = { t, R: st.R, p: st.p, v: st.v };
+    const dt = t - last.t;
+    if (dt < p.kfMinDt) return out;
+    const cam = this.cam, Rbc = cam.Rbc;
+    const M = mtm(Rbc, mtm(pr.dR, Rbc));
+    let surv = 0; const par = [], raw = [];
+    for (const tr of tracks) {
+      const o = this.lastKfObs.get(tr.id); if (!o) continue; surv++;
+      const q = mv(M, cam.bearing(o[0], o[1]));
+      raw.push(Math.hypot(tr.x - o[0], tr.y - o[1]));
+      if (q[2] > 1e-6) par.push(Math.hypot(tr.x - (cam.f * q[0] / q[2] + cam.cx), tr.y - (cam.f * q[1] / q[2] + cam.cy)));
+    }
+    const ratio = surv / Math.max(1, this.lastKfObs.size), parMed = median(par);
+    out.parallax = parMed; out.ratio = ratio;
+    if (parMed > p.kfParallax || ratio < p.kfTrackRatio || dt > p.kfMaxDt) {
+      const stat = this.isStatic(last.t, t, last.bg, raw.length ? median(raw) : 99);
+      this.addKeyframe(t, tracks, stat, out);
+      out.kf = true;
+    }
+    return out;
+  }
+
+  initialize(t, tracks, rest) {
+    const a = rest.aMean;
+    const roll = Math.atan2(a[1], a[2]), pitch = Math.atan2(-a[0], Math.hypot(a[1], a[2]));
+    const R = mm(Ry(pitch), Rx(roll));
+    const kf = { id: this.nextKf++, t, R, p: [0, 0, 0], v: [0, 0, 0], bg: rest.wMean.slice(), ba: [0, 0, 0], pre: null, stat: false,
+      priorBg: rest.wMean.slice(), priorBa: [0, 0, 0], priorV: [0, 0, 0], priorVSigma: this.p.zuptV };
+    this.kfs.push(kf); this.kfById.set(kf.id, kf);
+    this.addObs(kf, tracks);
+    this.status = 'tracking';
+    this.pose = { t, R, p: [0, 0, 0], v: [0, 0, 0] };
+    this.updateTraj(); this.lastKfId = kf.id;
+  }
+
+  addKeyframe(t, tracks, stat, out) {
+    const p = this.p, last = this.kfs[this.kfs.length - 1];
+    const pre = this.integrate(last.t, t, last.bg, last.ba, true);
+    if (!pre.Linv) { this.reset('preintegration'); out.reset = 'preintegration'; return; }
+    const pr = pre.predict(last);
+    const kf = { id: this.nextKf++, t, R: pr.R, p: pr.p, v: pr.v, bg: last.bg.slice(), ba: last.ba.slice(), pre, stat };
+    this.kfs.push(kf); this.kfById.set(kf.id, kf);
+    this.addObs(kf, tracks);
+    if (this.kfs.length > p.window) this.slide();
+    this.triangulate();
+    const t0 = now();
+    this.optimize();
+    this.solveMs = now() - t0;
+    this.cleanup(out.kill);
+    const bad = this.checkHealth();
+    if (bad) { this.reset(bad); out.reset = bad; return; }
+    this.updateTraj();
+    this.lastKfId = kf.id;
+    const lk = this.kfs[this.kfs.length - 1];
+    this.pose = { t, R: lk.R, p: lk.p, v: lk.v };
+  }
+
+  addObs(kf, tracks) {
+    const obsMap = new Map(), alive = new Set();
+    for (const tr of tracks) {
+      alive.add(tr.id);
+      let f = this.feats.get(tr.id);
+      if (!f) { f = { id: tr.id, obs: new Map(), lm: false, host: -1, b: null, rho: 0, prior: null, nTot: 0 }; this.feats.set(tr.id, f); }
+      const o = [tr.x, tr.y];
+      f.obs.set(kf.id, o); f.nTot++; obsMap.set(tr.id, o);
+    }
+    this.lastKfObs = obsMap;
+    for (const f of this.feats.values()) if (!alive.has(f.id) && !f.lm && f.obs.size < 2) this.feats.delete(f.id);
+  }
+
+  lmWorld(f, host) {
+    host = host || this.kfById.get(f.host);
+    const iz = 1 / f.rho;
+    const Xb = mv(this.cam.Rbc, [f.b[0] * iz, f.b[1] * iz, iz]);
+    return add3(mv(host.R, Xb), host.p);
+  }
+  toCam(kf, Xw) { return mtv(this.cam.Rbc, mtv(kf.R, sub3(Xw, kf.p))); }
+  pushMap(X) {
+    if (!X.every(Number.isFinite)) return;
+    this.mapPts.push(X);
+    if (this.mapPts.length > this.p.maxMapPts) this.mapPts.splice(0, this.mapPts.length - this.p.maxMapPts);
+  }
+  setHost(f, kfId, Xw) { // re-anchor landmark f at kfId (keeps its world point)
+    const k = this.kfById.get(kfId), o = f.obs.get(kfId);
+    const Xc = this.toCam(k, Xw);
+    if (!(Xc[2] > this.p.minDepth)) return false;
+    f.host = kfId; f.b = this.cam.bearing(o[0], o[1]); f.rho = 1 / Xc[2];
+    const dp = this.depthPriors.get(kfId), r = dp && dp.get(f.id);
+    f.prior = r ? { rho: r, sigma: this.p.depthRel * r } : null;
+    return true;
+  }
+
+  slide() {
+    const p = this.p, old = this.kfs.shift();
+    const nw = this.kfs[0];
+    nw.pre = null; nw.stat = false;
+    nw.priorBg = nw.bg.slice(); nw.priorBa = nw.ba.slice(); nw.priorV = nw.v.slice(); nw.priorVSigma = p.priorV;
+    for (const f of this.feats.values()) {
+      if (!f.obs.has(old.id)) continue;
+      if (f.lm && f.host === old.id) {
+        const Xw = this.lmWorld(f, old);
+        f.obs.delete(old.id);
+        let ok = false;
+        if (f.obs.size >= 2) ok = this.setHost(f, f.obs.keys().next().value, Xw);
+        if (!ok) { if (f.nTot >= 3) this.pushMap(Xw); f.lm = false; f.prior = null; }
+      } else f.obs.delete(old.id);
+      if (f.obs.size === 0) { if (f.lm && f.nTot >= 3) this.pushMap(this.lmWorld(f)); this.feats.delete(f.id); }
+      else if (f.lm && f.obs.size < 2) { if (f.nTot >= 3) this.pushMap(this.lmWorld(f)); f.lm = false; f.prior = null; }
+    }
+    this.kfById.delete(old.id);
+    this.depthPriors.delete(old.id);
+  }
+
+  triangulate() {
+    const p = this.p, cam = this.cam, Rbc = cam.Rbc;
+    const cosMin = Math.cos(p.minParallaxDeg * Math.PI / 180);
+    for (const f of this.feats.values()) {
+      if (f.lm || f.obs.size < 2) continue;
+      let first = null, last = null;
+      for (const e of f.obs) { if (!first) first = e; last = e; }
+      const kh = this.kfById.get(first[0]), kt = this.kfById.get(last[0]);
+      const bh = cam.bearing(first[1][0], first[1][1]), bt = cam.bearing(last[1][0], last[1][1]);
+      const d1 = mv(kh.R, mv(Rbc, bh)), d2 = mv(kt.R, mv(Rbc, bt));
+      const cs = dot3(d1, d2) / (norm3(d1) * norm3(d2));
+      if (cs < cosMin) {
+        const w = sub3(kh.p, kt.p), a = dot3(d1, d1), b = dot3(d1, d2), c = dot3(d2, d2), d = dot3(d1, w), e = dot3(d2, w);
+        const den = a * c - b * b;
+        if (Math.abs(den) < 1e-12) continue;
+        const s = (b * e - c * d) / den, u = (a * e - b * d) / den;
+        if (!(s > p.minDepth && u > p.minDepth && s < p.maxDepth && u < p.maxDepth)) continue;
+        const X = scl3(add3(add3(kh.p, scl3(d1, s)), add3(kt.p, scl3(d2, u))), 0.5);
+        let ok = true;
+        for (const [kid, o] of f.obs) {
+          const Xc = this.toCam(this.kfById.get(kid), X);
+          if (!(Xc[2] > p.minDepth)) { ok = false; break; }
+          const q = cam.project(Xc);
+          if (Math.hypot(q[0] - o[0], q[1] - o[1]) > p.outlierPx) { ok = false; break; }
+        }
+        if (!ok) continue;
+        f.lm = true; this.setHost(f, first[0], X) || (f.lm = false);
+      } else {
+        // not enough parallax: use a DA3 depth prior if one exists on an observing keyframe
+        for (const [kid, o] of f.obs) {
+          const dp = this.depthPriors.get(kid), r = dp && dp.get(f.id);
+          if (!r) continue;
+          f.lm = true; f.host = kid; f.b = cam.bearing(o[0], o[1]); f.rho = r; f.prior = { rho: r, sigma: p.depthRel * r };
+          break;
+        }
+      }
+    }
+  }
+
+  optimize() {
+    const p = this.p, K = this.kfs, N = K.length;
+    if (N < 2) return;
+    const n = 15 * N, cam = this.cam;
+    const slot = new Map(); K.forEach((k, i) => slot.set(k.id, i));
+    for (let i = 1; i < N; i++) { // re-integrate when the bias linearization point drifted
+      const pre = K[i].pre; if (!pre) continue;
+      if (norm3(sub3(K[i - 1].bg, pre.bg)) > p.reintBg || norm3(sub3(K[i - 1].ba, pre.ba)) > p.reintBa) {
+        const np = this.integrate(K[i - 1].t, K[i].t, K[i - 1].bg, K[i - 1].ba, true);
+        if (np.Linv) K[i].pre = np;
+      }
+    }
+    const L = [];
+    for (const f of this.feats.values()) if (f.lm && f.obs.size >= 2 && slot.has(f.host)) L.push(f);
+    // ---- factor list: s = state slots, d = [dof0, dof1), l = landmark idx, rob = huber
+    const F = [], sig = p.sigmaPx;
+    for (let i = 1; i < N; i++) {
+      const pre = K[i].pre;
+      if (pre && pre.Linv) F.push({ s: [i - 1, i], d: [0, 15], l: -1, rob: false, fn: st => imuResidual(pre, st[0], st[1], p) });
+    }
+    { const k0 = K[0], sbg = p.priorBg, sba = p.priorBa, sv = k0.priorVSigma || p.priorV;
+      F.push({ s: [0], d: [6, 15], l: -1, rob: false, fn: st => {
+        const s = st[0], r = new Array(9);
+        for (let i = 0; i < 3; i++) { r[i] = (s.v[i] - k0.priorV[i]) / sv; r[3 + i] = (s.bg[i] - k0.priorBg[i]) / sbg; r[6 + i] = (s.ba[i] - k0.priorBa[i]) / sba; }
+        return r;
+      } }); }
+    for (let i = 1; i < N; i++) {
+      if (!K[i].stat) continue;
+      F.push({ s: [i - 1, i], d: [0, 9], l: -1, rob: false, fn: st => {
+        const a = st[0], b = st[1], dR = logSO3(mtm(a.R, b.R)), r = new Array(12);
+        for (let j = 0; j < 3; j++) { r[j] = a.v[j] / p.zuptV; r[3 + j] = b.v[j] / p.zuptV; r[6 + j] = (b.p[j] - a.p[j]) / p.zuptP; r[9 + j] = dR[j] / p.zuptR; }
+        return r;
+      } });
+    }
+    L.forEach((f, li) => {
+      const hs = slot.get(f.host), b = f.b;
+      for (const [kid, o] of f.obs) {
+        if (kid === f.host) continue;
+        const ts = slot.get(kid); if (ts === undefined) continue;
+        F.push({ s: [hs, ts], d: [0, 6], l: li, rob: true, fn: (st, r) => reprojResidual(st[0], st[1], b, r, o, cam, sig) });
+      }
+      if (f.prior) { const pr = f.prior; F.push({ s: [], d: [0, 0], l: li, rob: false, fn: (st, r) => [(r - pr.rho) / pr.sigma] }); }
+    });
+
+    const hub = p.huber;
+    const fcost = (r, rob) => {
+      let s = 0; for (let i = 0; i < r.length; i++) s += r[i] * r[i];
+      if (!rob || s <= hub * hub) return s;
+      const e = Math.sqrt(s); return 2 * hub * e - hub * hub;
+    };
+    const totalCost = (S, rho) => {
+      let c = 0;
+      for (const f of F) c += fcost(f.fn(f.s.map(i => S[i]), f.l >= 0 ? rho[f.l] : 0), f.rob);
+      return c;
+    };
+    const nL = L.length;
+    const linearize = (S, rho) => {
+      const H = new Float64Array(n * n), g = new Float64Array(n);
+      const Hll = new Float64Array(nL), gl = new Float64Array(nL);
+      const Hlx = L.map(() => new Float64Array(n)), touch = L.map(() => new Set());
+      for (const f of F) {
+        const st = f.s.map(i => S[i]), rv = f.l >= 0 ? rho[f.l] : 0;
+        const r0 = f.fn(st, rv), m = r0.length;
+        let w = 1;
+        if (f.rob) { const e = Math.hypot(...r0); if (e > hub) w = hub / e; }
+        const cols = [];
+        for (let a = 0; a < f.s.length; a++) {
+          const si = f.s[a];
+          for (let k = f.d[0]; k < f.d[1]; k++) {
+            if (si === 0 && k < 6) continue; // gauge: oldest pose fixed
+            const s2 = st.slice();
+            s2[a] = perturb(st[a], k, 1); const rp = f.fn(s2, rv);
+            s2[a] = perturb(st[a], k, -1); const rm = f.fn(s2, rv);
+            const c = new Float64Array(m); for (let j = 0; j < m; j++) c[j] = (rp[j] - rm[j]) / (2 * EPS);
+            cols.push([si * 15 + k, c]);
+          }
+        }
+        for (let i = 0; i < cols.length; i++) {
+          const [gi, ci] = cols[i];
+          let s = 0; for (let j = 0; j < m; j++) s += ci[j] * r0[j]; g[gi] += w * s;
+          for (let q = i; q < cols.length; q++) {
+            const [gj, cj] = cols[q];
+            let v = 0; for (let j = 0; j < m; j++) v += ci[j] * cj[j]; v *= w;
+            H[gi * n + gj] += v; if (gi !== gj) H[gj * n + gi] += v;
+          }
+        }
+        if (f.l >= 0) {
+          const e = 1e-6 * Math.max(1, rv);
+          const rp = f.fn(st, rv + e), rm = f.fn(st, rv - e);
+          const cl = new Float64Array(m); for (let j = 0; j < m; j++) cl[j] = (rp[j] - rm[j]) / (2 * e);
+          let hll = 0, glv = 0; for (let j = 0; j < m; j++) { hll += cl[j] * cl[j]; glv += cl[j] * r0[j]; }
+          Hll[f.l] += w * hll; gl[f.l] += w * glv;
+          const hx = Hlx[f.l];
+          for (const [gi, ci] of cols) { let v = 0; for (let j = 0; j < m; j++) v += cl[j] * ci[j]; hx[gi] += w * v; touch[f.l].add(gi); }
+        }
+      }
+      return { H, g, Hll, gl, Hlx, touch: touch.map(s => Array.from(s)) };
+    };
+    const solve = (sys, lam) => {
+      const A = Float64Array.from(sys.H), b = new Float64Array(n);
+      for (let i = 0; i < n; i++) { b[i] = -sys.g[i]; A[i * n + i] = A[i * n + i] * (1 + lam) + 1e-9; }
+      const inv = new Float64Array(nL);
+      for (let l = 0; l < nL; l++) {
+        const h = sys.Hll[l] * (1 + lam) + 1e-12; inv[l] = 1 / h;
+        const hx = sys.Hlx[l], idx = sys.touch[l], gl = sys.gl[l];
+        for (const i of idx) {
+          const hi = hx[i] * inv[l];
+          b[i] += hi * gl;
+          for (const j of idx) A[i * n + j] -= hi * hx[j];
+        }
+      }
+      for (let k = 0; k < 6; k++) { for (let j = 0; j < n; j++) { A[k * n + j] = 0; A[j * n + k] = 0; } A[k * n + k] = 1; b[k] = 0; }
+      if (!cholesky(A, n)) return null;
+      const dx = cholSolve(A, b, n);
+      const dl = new Float64Array(nL);
+      for (let l = 0; l < nL; l++) {
+        let s = -sys.gl[l]; const hx = sys.Hlx[l];
+        for (const i of sys.touch[l]) s -= hx[i] * dx[i];
+        dl[l] = inv[l] * s;
+      }
+      return { dx, dl };
+    };
+    const apply = (S, dx) => S.map((s, i) => {
+      const o = i * 15;
+      return {
+        R: mm(s.R, expSO3([dx[o], dx[o + 1], dx[o + 2]])),
+        p: [s.p[0] + dx[o + 3], s.p[1] + dx[o + 4], s.p[2] + dx[o + 5]],
+        v: [s.v[0] + dx[o + 6], s.v[1] + dx[o + 7], s.v[2] + dx[o + 8]],
+        bg: [s.bg[0] + dx[o + 9], s.bg[1] + dx[o + 10], s.bg[2] + dx[o + 11]],
+        ba: [s.ba[0] + dx[o + 12], s.ba[1] + dx[o + 13], s.ba[2] + dx[o + 14]],
+      };
+    });
+
+    let S = K.map(k => ({ R: k.R, p: k.p, v: k.v, bg: k.bg, ba: k.ba }));
+    let rho = L.map(f => f.rho);
+    let cost = totalCost(S, rho), lam = 1e-4, it = 0;
+    const cost0 = cost;
+    outer: for (; it < p.lmIters; it++) {
+      const sys = linearize(S, rho);
+      for (let tries = 0; tries < 6; tries++) {
+        const st = solve(sys, lam);
+        if (!st) { lam *= 10; continue; }
+        const S2 = apply(S, st.dx), rho2 = rho.map((r, i) => Math.max(1e-3, r + st.dl[i]));
+        const c2 = totalCost(S2, rho2);
+        if (c2 < cost) {
+          const rel = (cost - c2) / Math.max(cost, 1e-12);
+          S = S2; rho = rho2; cost = c2; lam = Math.max(lam / 3, 1e-8);
+          if (rel < 1e-5) { it++; break outer; }
+          continue outer;
+        }
+        lam *= 6;
+      }
+      break;
+    }
+    K.forEach((k, i) => { const s = S[i]; k.R = orthoR(s.R); k.p = s.p; k.v = s.v; k.bg = s.bg; k.ba = s.ba; });
+    L.forEach((f, i) => { f.rho = rho[i]; });
+    this.lastCost = cost; this.firstCost = cost0; this.lastIters = it; this.nFactors = F.length; this.nLm = nL;
+  }
+
+  cleanup(kill) {
+    const p = this.p, cam = this.cam, latest = this.kfs[this.kfs.length - 1].id;
+    for (const f of this.feats.values()) {
+      if (!f.lm) continue;
+      const depth = 1 / f.rho;
+      let drop = !(depth > p.minDepth && depth < p.maxDepth) || !this.kfById.has(f.host);
+      if (!drop) {
+        const Xw = this.lmWorld(f);
+        for (const [kid, o] of f.obs) {
+          if (kid === f.host) continue;
+          const Xc = this.toCam(this.kfById.get(kid), Xw);
+          if (!(Xc[2] > p.minDepth)) { drop = true; break; }
+          const q = cam.project(Xc);
+          if (Math.hypot(q[0] - o[0], q[1] - o[1]) > p.outlierPx) {
+            if (kid === latest) { drop = true; break; }
+            f.obs.delete(kid);
+          }
+        }
+      }
+      if (drop) { kill.push(f.id); this.feats.delete(f.id); continue; }
+      if (f.obs.size < 2) { f.lm = false; f.prior = null; }
+    }
+  }
+
+  checkHealth() {
+    const p = this.p;
+    for (const k of this.kfs) {
+      const all = [...k.R, ...k.p, ...k.v, ...k.bg, ...k.ba];
+      if (!all.every(Number.isFinite)) return 'NaN in state';
+      if (norm3(k.v) > p.maxSpeed) return 'speed > ' + p.maxSpeed + ' m/s';
+      if (norm3(k.bg) > p.maxBg) return 'gyro bias exploded';
+      if (norm3(k.ba) > p.maxBa) return 'accel bias exploded';
+    }
+    return null;
+  }
+
+  updateTraj() {
+    for (const k of this.kfs) {
+      let e = this.trajById.get(k.id);
+      if (!e) { e = { id: k.id, t: k.t }; this.trajById.set(k.id, e); this.traj.push(e); }
+      e.p = k.p.slice(); e.R = k.R.slice();
+    }
+    if (this.trajById.size > 4 * this.p.window) for (const e of this.traj.slice(-4 * this.p.window - 10, -4 * this.p.window)) this.trajById.delete(e.id);
+  }
+  pathLength() {
+    let s = 0; for (let i = 1; i < this.traj.length; i++) s += norm3(sub3(this.traj[i].p, this.traj[i - 1].p)); return s;
+  }
+  windowLandmarks() {
+    const out = [];
+    for (const f of this.feats.values()) if (f.lm && this.kfById.has(f.host)) out.push(this.lmWorld(f));
+    return out;
+  }
+
+  // DA3 depth prior: data = raw model output (depth OR inverse depth, unknown scale)
+  addDepthMap(kfId, data, dw, dh) {
+    const kf = this.kfById.get(kfId), cam = this.cam, p = this.p;
+    if (!kf || !cam) return null;
+    const sample = (u, v) => {
+      const x = Math.min(dw - 1.001, Math.max(0, u * dw / cam.W - 0.5)), y = Math.min(dh - 1.001, Math.max(0, v * dh / cam.H - 0.5));
+      const x0 = x | 0, y0 = y | 0, ax = x - x0, ay = y - y0, i = y0 * dw + x0;
+      return (data[i] * (1 - ax) + data[i + 1] * ax) * (1 - ay) + (data[i + dw] * (1 - ax) + data[i + dw + 1] * ax) * ay;
+    };
+    const pairs = [], all = [];
+    for (const f of this.feats.values()) {
+      const o = f.obs.get(kfId); if (!o) continue;
+      const d = sample(o[0], o[1]); if (!(d > 1e-6)) continue;
+      all.push([f, d]);
+      if (f.lm && f.obs.size >= 3 && this.kfById.has(f.host)) {
+        const Z = this.toCam(kf, this.lmWorld(f))[2];
+        if (Z > p.minDepth) pairs.push([d, Z]);
+      }
+    }
+    if (pairs.length < 8) return { ok: false, n: pairs.length };
+    // depth or inverse depth? correlation sign of log(d) vs log(Z), accumulated over maps
+    const ld = pairs.map(q => Math.log(q[0])), lz = pairs.map(q => Math.log(q[1]));
+    const md = ld.reduce((a, b) => a + b) / ld.length, mz = lz.reduce((a, b) => a + b) / lz.length;
+    let cov = 0; for (let i = 0; i < ld.length; i++) cov += (ld[i] - md) * (lz[i] - mz);
+    this.da3.vote += Math.sign(cov);
+    const inv = this.da3.vote < 0;
+    const scale = median(pairs.map(([d, Z]) => inv ? Z * d : Z / d));
+    const toZ = d => inv ? scale / d : scale * d;
+    const err = median(pairs.map(([d, Z]) => Math.abs(toZ(d) - Z) / Z));
+    this.da3 = { maps: this.da3.maps + 1, mode: inv ? 'inverse depth' : 'depth', scale, err, vote: this.da3.vote, n: pairs.length };
+    if (err > 0.5) return { ok: false, err };
+    const m = new Map();
+    for (const [f, d] of all) {
+      const Z = toZ(d); if (!(Z > p.minDepth && Z < p.maxDepth)) continue;
+      m.set(f.id, 1 / Z);
+      if (f.lm && f.host === kfId) f.prior = { rho: 1 / Z, sigma: p.depthRel / Z };
+    }
+    this.depthPriors.set(kfId, m);
+    return { ok: true, scale, err, mode: this.da3.mode, n: pairs.length };
+  }
+}
+
+// ======================================================================
+//                         FRONT END: KLT TRACKER
+// ======================================================================
+function buildLevel(img, W, H) {
+  const gx = new Float32Array(W * H), gy = new Float32Array(W * H);
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x;
+    // Scharr
+    gx[i] = (3 * (img[i - W + 1] - img[i - W - 1]) + 10 * (img[i + 1] - img[i - 1]) + 3 * (img[i + W + 1] - img[i + W - 1])) / 32;
+    gy[i] = (3 * (img[i + W - 1] - img[i - W - 1]) + 10 * (img[i + W] - img[i - W]) + 3 * (img[i + W + 1] - img[i - W + 1])) / 32;
+  }
+  return { img, gx, gy, W, H };
+}
+function downsample(img, W, H) {
+  const w = W >> 1, h = H >> 1, o = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const X = 2 * x, Y = 2 * y;
+    const xm = Math.max(0, X - 1), xp = Math.min(W - 1, X + 1), ym = Math.max(0, Y - 1), yp = Math.min(H - 1, Y + 1);
+    const r = (yy) => img[yy * W + xm] + 2 * img[yy * W + X] + img[yy * W + xp];
+    o[y * w + x] = (r(ym) + 2 * r(Y) + r(yp)) / 16;
+  }
+  return { img: o, W: w, H: h };
+}
+function buildPyramid(gray, W, H, levels) {
+  const P = [buildLevel(gray, W, H)];
+  let cur = { img: gray, W, H };
+  for (let l = 1; l < levels; l++) { cur = downsample(cur.img, cur.W, cur.H); P.push(buildLevel(cur.img, cur.W, cur.H)); }
+  return P;
+}
+function bil(a, W, x, y) {
+  const x0 = x | 0, y0 = y | 0, ax = x - x0, ay = y - y0, i = y0 * W + x0;
+  return (a[i] * (1 - ax) + a[i + 1] * ax) * (1 - ay) + (a[i + W] * (1 - ax) + a[i + W + 1] * ax) * ay;
+}
+
+class Tracker {
+  constructor(params) {
+    this.p = Object.assign({ maxFeatures: 140, minDist: 12, win: 11, levels: 3, fbThresh: 1.0, iters: 20, minEig: 0.05, quality: 0.01, border: 8 }, params || {});
+    this.reset();
+  }
+  reset() { this.prev = null; this.pts = []; if (!this.nextId) this.nextId = 1; }
+  kill(ids) { if (!ids.length) return; const s = new Set(ids); this.pts = this.pts.filter(q => !s.has(q.id)); }
+
+  // track (x0,y0) from pyramid A to pyramid B, initial guess (gx,gy)
+  lk(A, B, x0, y0, gx, gy) {
+    const p = this.p, half = (p.win - 1) >> 1, nL = A.length, np = p.win * p.win;
+    const T = new Float32Array(np), IX = new Float32Array(np), IY = new Float32Array(np);
+    let dx = (gx - x0) / (1 << (nL - 1)), dy = (gy - y0) / (1 << (nL - 1));
+    for (let l = nL - 1; l >= 0; l--) {
+      const a = A[l], b = B[l], s = 1 / (1 << l), px = x0 * s, py = y0 * s;
+      const inA = px - half >= 1 && py - half >= 1 && px + half < a.W - 2 && py + half < a.H - 2;
+      if (!inA) { if (l === 0) return null; dx *= 2; dy *= 2; continue; }
+      let gxx = 0, gxy = 0, gyy = 0, k = 0;
+      for (let j = -half; j <= half; j++) for (let i = -half; i <= half; i++, k++) {
+        const X = px + i, Y = py + j;
+        T[k] = bil(a.img, a.W, X, Y); const ix = bil(a.gx, a.W, X, Y), iy = bil(a.gy, a.W, X, Y);
+        IX[k] = ix; IY[k] = iy; gxx += ix * ix; gxy += ix * iy; gyy += iy * iy;
+      }
+      const det = gxx * gyy - gxy * gxy;
+      const mine = (gxx + gyy - Math.sqrt((gxx - gyy) ** 2 + 4 * gxy * gxy)) / (2 * np);
+      if (mine < p.minEig || det < 1e-9) return null;
+      for (let it = 0; it < p.iters; it++) {
+        const qx = px + dx, qy = py + dy;
+        if (qx - half < 1 || qy - half < 1 || qx + half >= b.W - 2 || qy + half >= b.H - 2) return null;
+        let bx = 0, by = 0; k = 0;
+        for (let j = -half; j <= half; j++) for (let i = -half; i <= half; i++, k++) {
+          const e = bil(b.img, b.W, qx + i, qy + j) - T[k];
+          bx += e * IX[k]; by += e * IY[k];
+        }
+        const ux = -(gyy * bx - gxy * by) / det, uy = -(gxx * by - gxy * bx) / det;
+        dx += ux; dy += uy;
+        if (ux * ux + uy * uy < 1e-4) break;
+      }
+      if (l > 0) { dx *= 2; dy *= 2; }
+    }
+    return [x0 + dx, y0 + dy];
+  }
+
+  process(gray, W, H, predict) {
+    const p = this.p;
+    const pyr = buildPyramid(gray, W, H, p.levels);
+    if (this.prev && this.prev[0].W === W && this.prev[0].H === H) {
+      const out = [], B = p.border;
+      for (const q of this.pts) {
+        const g = (predict && predict(q.x, q.y)) || [q.x, q.y];
+        const f = this.lk(this.prev, pyr, q.x, q.y, g[0], g[1]);
+        if (!f || f[0] < B || f[1] < B || f[0] > W - B || f[1] > H - B) continue;
+        const bk = this.lk(pyr, this.prev, f[0], f[1], q.x, q.y);
+        if (!bk || Math.hypot(bk[0] - q.x, bk[1] - q.y) > p.fbThresh) continue;
+        out.push({ id: q.id, x: f[0], y: f[1], age: q.age + 1 });
+      }
+      this.pts = out;
+    } else this.pts = [];
+    if (this.pts.length < p.maxFeatures * 0.9) this.detect(pyr[0]);
+    this.prev = pyr;
+    return this.pts;
+  }
+
+  detect(L0) {
+    const p = this.p, { W, H, gx, gy } = L0, r = 2;
+    const n = W * H, xx = new Float32Array(n), xy = new Float32Array(n), yy = new Float32Array(n);
+    for (let i = 0; i < n; i++) { xx[i] = gx[i] * gx[i]; xy[i] = gx[i] * gy[i]; yy[i] = gy[i] * gy[i]; }
+    const box = (a) => { // separable (2r+1)^2 box sum
+      const t = new Float32Array(n), o = new Float32Array(n);
+      for (let y = 0; y < H; y++) { let s = 0; const row = y * W;
+        for (let x = 0; x < Math.min(W, r); x++) s += a[row + x];
+        for (let x = 0; x < W; x++) { if (x + r < W) s += a[row + x + r]; if (x - r - 1 >= 0) s -= a[row + x - r - 1]; t[row + x] = s; } }
+      for (let x = 0; x < W; x++) { let s = 0;
+        for (let y = 0; y < Math.min(H, r); y++) s += t[y * W + x];
+        for (let y = 0; y < H; y++) { if (y + r < H) s += t[(y + r) * W + x]; if (y - r - 1 >= 0) s -= t[(y - r - 1) * W + x]; o[y * W + x] = s; } }
+      return o;
+    };
+    const A = box(xx), Bm = box(xy), C = box(yy), sc = new Float32Array(n);
+    let mx = 0; const bd = Math.max(p.border, (p.win >> 1) + 2);
+    for (let y = bd; y < H - bd; y++) for (let x = bd; x < W - bd; x++) {
+      const i = y * W + x, a = A[i], b = Bm[i], c = C[i];
+      const e = (a + c - Math.sqrt((a - c) * (a - c) + 4 * b * b)) / 2; sc[i] = e; if (e > mx) mx = e;
+    }
+    const thr = Math.max(mx * p.quality, p.minEig * 25 * 4);
+    const cand = [];
+    for (let y = bd; y < H - bd; y++) for (let x = bd; x < W - bd; x++) {
+      const i = y * W + x, e = sc[i];
+      if (e < thr) continue;
+      if (e < sc[i - 1] || e < sc[i + 1] || e < sc[i - W] || e < sc[i + W] || e < sc[i - W - 1] || e < sc[i - W + 1] || e < sc[i + W - 1] || e < sc[i + W + 1]) continue;
+      cand.push([e, x, y]);
+    }
+    cand.sort((a, b) => b[0] - a[0]);
+    const md = p.minDist, cs = md, gw = Math.ceil(W / cs) + 1, gh = Math.ceil(H / cs) + 1;
+    const grid = new Array(gw * gh); for (let i = 0; i < grid.length; i++) grid[i] = [];
+    const put = (x, y) => grid[((y / cs) | 0) * gw + ((x / cs) | 0)].push([x, y]);
+    const free = (x, y) => {
+      const cx = (x / cs) | 0, cy = (y / cs) | 0;
+      for (let j = Math.max(0, cy - 1); j <= Math.min(gh - 1, cy + 1); j++) for (let i = Math.max(0, cx - 1); i <= Math.min(gw - 1, cx + 1); i++)
+        for (const q of grid[j * gw + i]) if ((q[0] - x) ** 2 + (q[1] - y) ** 2 < md * md) return false;
+      return true;
+    };
+    for (const q of this.pts) put(q.x, q.y);
+    // coarse regions cap so corners spread across the image
+    const RX = W > H ? 8 : 6, RY = W > H ? 6 : 8, rc = new Int32Array(RX * RY);
+    for (const q of this.pts) rc[Math.min(RY - 1, (q.y * RY / H) | 0) * RX + Math.min(RX - 1, (q.x * RX / W) | 0)]++;
+    const cap = Math.ceil(1.5 * p.maxFeatures / (RX * RY));
+    let need = p.maxFeatures - this.pts.length;
+    for (const [, x, y] of cand) {
+      if (need <= 0) break;
+      const ri = Math.min(RY - 1, (y * RY / H) | 0) * RX + Math.min(RX - 1, (x * RX / W) | 0);
+      if (rc[ri] >= cap || !free(x, y)) continue;
+      put(x, y); rc[ri]++; need--;
+      this.pts.push({ id: this.nextId++, x, y, age: 0 });
+    }
+  }
+}
+
+// ======================================================================
+//            CALIBRATION: offset / time offset / focal length
+// ======================================================================
+// pairs: [{t0, t1, a:[x,y,...], b:[x,y,...]}] (camera timestamps), imu: ImuBuf
+function calibrate(pairs, imu, opt) {
+  const { W, H, screenAngle = 0, bg = [0, 0, 0] } = opt;
+  const clip = opt.clip || 8, clip2 = clip * clip;
+  pairs = pairs.filter(q => q.a.length >= 8);
+  if (pairs.length > 160) { const st = pairs.length / 160; pairs = Array.from({ length: 160 }, (_, i) => pairs[Math.floor(i * st)]); }
+  pairs = pairs.map(q => { if (q.a.length <= 60) return q; const k = Math.ceil(q.a.length / 60); const a = [], b = [];
+    for (let i = 0; i < q.a.length / 2; i += k) { a.push(q.a[2 * i], q.a[2 * i + 1]); b.push(q.b[2 * i], q.b[2 * i + 1]); } return { t0: q.t0, t1: q.t1, a, b }; });
+  if (pairs.length < 10) return null;
+  const tmp = new ImuBuf(); tmp.a = imu.a;
+  const dRcache = new Map();
+  const dRs = td => {
+    const key = Math.round(td * 1e4);
+    if (!dRcache.has(key)) dRcache.set(key, pairs.map(q => {
+      let R = I3(); tmp.segments(q.t0 + td, q.t1 + td, (w, a, dt) => { R = mm(R, expSO3(scl3(sub3(w, bg), dt))); }); return R;
+    }));
+    return dRcache.get(key);
+  };
+  const err = (offset, td, fov) => {
+    const cam = makeCam(W, H, fov, screenAngle + offset), Rbc = cam.Rbc, R = dRs(td);
+    let s = 0, c = 0;
+    for (let i = 0; i < pairs.length; i++) {
+      const M = mtm(Rbc, mtm(R[i], Rbc)), A = pairs[i].a, B = pairs[i].b;
+      for (let k = 0; k < A.length; k += 2) {
+        const x = (A[k] - cam.cx) / cam.f, y = (A[k + 1] - cam.cy) / cam.f;
+        const qz = M[6] * x + M[7] * y + M[8];
+        let e2 = clip2;
+        if (qz > 1e-3) {
+          const u = cam.f * (M[0] * x + M[1] * y + M[2]) / qz + cam.cx, v = cam.f * (M[3] * x + M[4] * y + M[5]) / qz + cam.cy;
+          e2 = Math.min(clip2, (u - B[k]) ** 2 + (v - B[k + 1]) ** 2);
+        }
+        s += e2; c++;
+      }
+    }
+    return s / Math.max(1, c);
+  };
+  let best = { e: Infinity };
+  for (let td = -0.15; td <= 0.15001; td += 0.01)
+    for (const off of [0, 90, 180, 270]) for (const fov of [50, 65, 80]) {
+      const e = err(off, td, fov); if (e < best.e) best = { e, off, td, fov };
+    }
+  const refineTd = (span) => {
+    const c = best.td;
+    for (let td = c - span; td <= c + span + 1e-9; td += 0.002) { const e = err(best.off, td, best.fov); if (e < best.e) best = { ...best, e, td }; }
+  };
+  refineTd(0.012);
+  // golden-section on FOV
+  let a = 35, b = 110; const gr = (Math.sqrt(5) - 1) / 2;
+  let x1 = b - gr * (b - a), x2 = a + gr * (b - a), f1 = err(best.off, best.td, x1), f2 = err(best.off, best.td, x2);
+  for (let i = 0; i < 30; i++) {
+    if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = b - gr * (b - a); f1 = err(best.off, best.td, x1); }
+    else { a = x1; x1 = x2; f1 = f2; x2 = a + gr * (b - a); f2 = err(best.off, best.td, x2); }
+  }
+  const fov = (a + b) / 2, ef = err(best.off, best.td, fov);
+  if (ef <= best.e) best = { ...best, e: ef, fov };
+  refineTd(0.006);
+  const base = err(best.off, best.td, best.fov);
+  // baseline: no rotation compensation at all
+  let s0 = 0, c0 = 0;
+  for (const q of pairs) for (let k = 0; k < q.a.length; k += 2) { s0 += Math.min(clip2, (q.a[k] - q.b[k]) ** 2 + (q.a[k + 1] - q.b[k + 1]) ** 2); c0++; }
+  return { offset: best.off, td: best.td, fov: best.fov, rms: Math.sqrt(base), rmsNoComp: Math.sqrt(s0 / c0), pairs: pairs.length };
+}
+
+return { GRAV, add3, sub3, scl3, dot3, cross3, norm3, I3, mm, mtm, mmt, mv, mtv, skew, expSO3, logSO3, rightJ, quatFromR, RfromQuat, Rx, Ry, Rz,
+  median, makeCam, ImuBuf, Preint, Estimator, Tracker, buildPyramid, calibrate, DEFAULTS };
+})();
+</script>
+
+<script>
+(() => {
+'use strict';
+const { Estimator, Tracker, makeCam, ImuBuf, mv, mtm, quatFromR, norm3, sub3, add3, scl3, cross3, dot3 } = VIO;
+const $ = id => document.getElementById(id);
+const LS_SET = 'pocketvio.settings.v1', LS_CAL = 'pocketvio.calib.v1';
+const D = VIO.DEFAULTS;
+
+// ------------------------------------------------------------------ settings
+// [key, label, group, default, step, target]  target: est | trk | app | cam
+const SCHEMA = [
+  ['procSize', 'Processing long side (px)', 'Camera', 360, 10, 'cam'],
+  ['fov', 'FOV, long side (°)', 'Camera', 66, 0.1, 'cam'],
+  ['td', 'Camera→IMU time offset td (ms)', 'Camera', 0, 1, 'est'],
+  ['camOffset', 'In-plane camera rotation offset (°)', 'Camera', 0, 90, 'cam'],
+  ['imuFreq', 'IMU frequency (Hz)', 'Camera', 200, 10, 'app'],
+  ['maxFeatures', 'Max features', 'Front end', 140, 1, 'trk'],
+  ['minDist', 'Min corner distance (px)', 'Front end', 12, 1, 'trk'],
+  ['win', 'LK window (px, odd)', 'Front end', 11, 2, 'trk'],
+  ['levels', 'Pyramid levels', 'Front end', 3, 1, 'trk'],
+  ['fbThresh', 'Forward-backward max error (px)', 'Front end', 1.0, 0.1, 'trk'],
+  ['minEig', 'Min LK eigenvalue', 'Front end', 0.05, 0.01, 'trk'],
+  ['usePredict', 'Gyro-predicted tracking (1 = on)', 'Front end', 1, 1, 'app'],
+  ['kfParallax', 'Keyframe: rotation-compensated parallax (px)', 'Keyframes', D.kfParallax, 1, 'est'],
+  ['kfTrackRatio', 'Keyframe: min surviving track ratio', 'Keyframes', D.kfTrackRatio, 0.05, 'est'],
+  ['kfMaxDt', 'Keyframe: max interval (s)', 'Keyframes', D.kfMaxDt, 0.01, 'est'],
+  ['kfMinDt', 'Keyframe: min interval (s)', 'Keyframes', D.kfMinDt, 0.01, 'est'],
+  ['staticGyro', 'Static: gyro deviation (rad/s)', 'Keyframes', D.staticGyro, 0.005, 'est'],
+  ['staticAcc', 'Static: accel-norm std (m/s²)', 'Keyframes', D.staticAcc, 0.01, 'est'],
+  ['staticPx', 'Static: pixel motion (px)', 'Keyframes', D.staticPx, 0.1, 'est'],
+  ['initRest', 'Init: rest duration (s)', 'Initialization', D.initRest, 0.1, 'est'],
+  ['initTracks', 'Init: min tracked features', 'Initialization', D.initTracks, 1, 'est'],
+  ['window', 'Sliding window size (keyframes)', 'Back end', D.window, 1, 'est'],
+  ['lmIters', 'Levenberg-Marquardt iterations', 'Back end', D.lmIters, 1, 'est'],
+  ['sigmaPx', 'Reprojection σ (px)', 'Back end', D.sigmaPx, 0.1, 'est'],
+  ['huber', 'Huber threshold (σ units)', 'Back end', D.huber, 0.1, 'est'],
+  ['minParallaxDeg', 'Triangulation min parallax (°)', 'Back end', D.minParallaxDeg, 0.1, 'est'],
+  ['outlierPx', 'Outlier observation threshold (px)', 'Back end', D.outlierPx, 0.5, 'est'],
+  ['minDepth', 'Landmark min depth (m)', 'Back end', D.minDepth, 0.05, 'est'],
+  ['maxDepth', 'Landmark max depth (m)', 'Back end', D.maxDepth, 1, 'est'],
+  ['ng', 'Gyro noise density (rad/s/√Hz)', 'IMU noise', D.ng, 0.0005, 'est'],
+  ['na', 'Accel noise density (m/s²/√Hz)', 'IMU noise', D.na, 0.005, 'est'],
+  ['nbg', 'Gyro bias random walk', 'IMU noise', D.nbg, 0.00005, 'est'],
+  ['nba', 'Accel bias random walk', 'IMU noise', D.nba, 0.0005, 'est'],
+  ['priorBg', 'Gyro bias prior σ (rad/s)', 'Priors', D.priorBg, 0.001, 'est'],
+  ['priorBa', 'Accel bias prior σ (m/s²)', 'Priors', D.priorBa, 0.01, 'est'],
+  ['priorV', 'Oldest-keyframe velocity prior σ (m/s)', 'Priors', D.priorV, 0.01, 'est'],
+  ['zuptV', 'Zero-velocity σ (m/s)', 'Priors', D.zuptV, 0.001, 'est'],
+  ['zuptP', 'No-movement position σ (m)', 'Priors', D.zuptP, 0.001, 'est'],
+  ['zuptR', 'No-movement rotation σ (rad)', 'Priors', D.zuptR, 0.001, 'est'],
+  ['depthRel', 'DA3 inverse-depth prior σ (relative)', 'Priors', D.depthRel, 0.05, 'est'],
+  ['maxSpeed', 'Reset if speed above (m/s)', 'Safety', D.maxSpeed, 1, 'est'],
+  ['maxBg', 'Reset if |gyro bias| above (rad/s)', 'Safety', D.maxBg, 0.05, 'est'],
+  ['maxBa', 'Reset if |accel bias| above (m/s²)', 'Safety', D.maxBa, 0.1, 'est'],
+  ['da3Model', 'DA3 model id', 'Depth prior', 'onnx-community/depth-anything-v3-small', 0, 'app'],
+];
+const DEF = Object.fromEntries(SCHEMA.map(s => [s[0], s[3]]));
+const lsGet = k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } };
+const SET = Object.assign({}, DEF, lsGet(LS_SET) || {}, lsGet(LS_CAL) || {});
+const saveSettings = () => lsSet(LS_SET, SET);
+
+// ------------------------------------------------------------------ state
+const S = {
+  mode: 'idle', est: null, trk: null, stream: null, sensors: [], dm: false, wake: null,
+  W: 0, H: 0, proc: null, pctx: null, frameQ: [], prevT: null, pumpTimer: 0,
+  imuCount: 0, imuRate: 0, frames: 0, fps: 0, trackMs: 0, lastTracks: [], imuSrc: '-',
+  calib: null, lastCalib: null, lastReset: '', vfcSupported: 'requestVideoFrameCallback' in HTMLVideoElement.prototype,
+  da3: { on: false, ready: false, loading: false, busy: false, status: 'off', pipe: null, RawImage: null, ms: 0 },
+};
+const video = $('video');
+const newEstimator = () => {
+  const p = {}; for (const [k, , , , , to] of SCHEMA) if (to === 'est' && k in D) p[k] = SET[k];
+  p.td = SET.td / 1000;
+  return new Estimator(p);
+};
+const trkParams = () => ({ maxFeatures: SET.maxFeatures, minDist: SET.minDist, win: SET.win | 1, levels: SET.levels, fbThresh: SET.fbThresh, minEig: SET.minEig });
+S.est = newEstimator();
+S.trk = new Tracker(trkParams());
+
+const screenAngle = () => (screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle : (window.orientation || 0);
+function updateCamera() {
+  if (!S.W) return;
+  S.est.setCamera(makeCam(S.W, S.H, SET.fov, screenAngle() + SET.camOffset));
+}
+function reinit(reason) {
+  S.est.reset(reason); S.trk.reset(); S.prevT = null; S.frameQ.length = 0;
+  S.lastReset = reason || '';
+}
+
+// ------------------------------------------------------------------ diagnostics
+async function diagnose(prefix) {
+  const parts = [prefix || 'Diagnostics:',
+    `isSecureContext=${window.isSecureContext}`,
+    `framed=${(() => { try { return window.self !== window.top; } catch (e) { return true; } })()}`,
+    `origin=${location.origin}`];
+  for (const name of ['accelerometer', 'gyroscope']) {
+    try { const r = await navigator.permissions.query({ name }); parts.push(`${name}=${r.state}`); }
+    catch (e) { parts.push(`${name}=query unsupported`); }
+  }
+  if (/^(content|file):/.test(location.protocol) || location.origin === 'null')
+    parts.push('note: content:// and file:// origins always report sensors as denied — serve over https:// or http://localhost');
+  if (!window.isSecureContext) parts.push('note: camera and motion sensors need a secure context (HTTPS or localhost)');
+  $('diag').textContent = parts.join('\n');
+}
+
+// ------------------------------------------------------------------ IMU
+function pushImu(t, w, a) {
+  S.est.addImu(t, w, a);
+  if (S.calib) S.calib.imu.push(t, w, a);
+  S.imuCount++;
+}
+function onDeviceMotion(e) {
+  const r = e.rotationRate, a = e.accelerationIncludingGravity;
+  if (!r || !a || r.alpha == null || a.x == null) return;
+  const d = Math.PI / 180; // rotationRate is deg/s: alpha = z, beta = x, gamma = y
+  pushImu(e.timeStamp / 1000, [r.beta * d, r.gamma * d, r.alpha * d], [a.x, a.y, a.z]);
+}
+function useDeviceMotion(why) {
+  if (S.dm) return;
+  for (const s of S.sensors) { try { s.stop(); } catch (e) { /* ignore */ } }
+  S.sensors = [];
+  S.dm = true; S.imuSrc = 'devicemotion';
+  window.addEventListener('devicemotion', onDeviceMotion);
+  if (why) diagnose(`Generic Sensor API unavailable (${why}); using devicemotion.`);
+  setTimeout(() => { if (S.mode !== 'idle' && S.imuCount === 0) { diagnose('No IMU data from devicemotion either.'); setHint('No motion-sensor data. See diagnostics below.', 'bad'); } }, 2000);
+}
+function startSensors() {
+  S.imuCount = 0;
+  if (!('Gyroscope' in window && 'Accelerometer' in window)) { useDeviceMotion(); return; }
+  try {
+    const f = SET.imuFreq;
+    const g = new Gyroscope({ frequency: f, referenceFrame: 'device' });
+    const acc = new Accelerometer({ frequency: f, referenceFrame: 'device' });
+    let lastA = null;
+    acc.addEventListener('reading', () => { lastA = [acc.x, acc.y, acc.z]; });
+    g.addEventListener('reading', () => { if (lastA && g.timestamp != null) pushImu(g.timestamp / 1000, [g.x, g.y, g.z], lastA); });
+    const onErr = e => useDeviceMotion((e.error && (e.error.name + ': ' + e.error.message)) || 'sensor error');
+    g.addEventListener('error', onErr); acc.addEventListener('error', onErr);
+    g.start(); acc.start();
+    S.sensors = [g, acc]; S.imuSrc = 'Generic Sensor';
+    setTimeout(() => { if (S.mode !== 'idle' && S.imuCount === 0) useDeviceMotion('no readings after 1.5 s'); }, 1500);
+  } catch (e) { useDeviceMotion(e.name + ': ' + e.message); }
+}
+function stopSensors() {
+  for (const s of S.sensors) { try { s.stop(); } catch (e) { /* ignore */ } }
+  S.sensors = [];
+  if (S.dm) { window.removeEventListener('devicemotion', onDeviceMotion); S.dm = false; }
+}
+
+// ------------------------------------------------------------------ wake lock
+async function requestWakeLock() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') S.wake = await navigator.wakeLock.request('screen'); }
+  catch (e) { /* not fatal */ }
+}
+
+// ------------------------------------------------------------------ start / stop
+$('bStart').addEventListener('click', () => {
+  const permP = (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') ? DeviceMotionEvent.requestPermission() : null;
+  start(permP);
+});
+async function start(permP) {
+  if (S.mode !== 'idle') return;
+  $('bStart').disabled = true;
+  try {
+    if (permP) { const r = await permP.catch(e => 'error: ' + e.message); if (r !== 'granted') diagnose(`DeviceMotionEvent.requestPermission → ${r}`); }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('getUserMedia unavailable (needs HTTPS or localhost)');
+    S.mode = 'running';
+    startSensors();
+    S.stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'environment', width: 640, height: 480, frameRate: 30 } });
+    video.srcObject = S.stream;
+    await video.play();
+    $('camEmpty').style.display = 'none';
+    reinit('start');
+    if (S.vfcSupported) video.requestVideoFrameCallback(onVideoFrame);
+    else requestAnimationFrame(rafFrame);
+    requestWakeLock();
+    $('bReinit').disabled = $('bCalib').disabled = $('bStop').disabled = false;
+    setHint('Hold the phone still for a second, pointed at a textured scene.');
+  } catch (e) {
+    stop();
+    setHint(`Could not start: ${e.name || ''} ${e.message}`, 'bad');
+    diagnose(`Start failed: ${e.name || ''} ${e.message}`);
+  }
+}
+function stop() {
+  S.mode = 'idle'; S.calib = null;
+  stopSensors();
+  if (S.stream) { for (const t of S.stream.getTracks()) t.stop(); S.stream = null; }
+  video.srcObject = null;
+  if (S.wake) { S.wake.release().catch(() => {}); S.wake = null; }
+  $('bStart').disabled = false; $('bReinit').disabled = $('bCalib').disabled = $('bStop').disabled = true;
+}
+$('bStop').addEventListener('click', () => { stop(); setHint('Stopped. Export is still available.'); });
+$('bReinit').addEventListener('click', () => { if (S.mode === 'running') { reinit('manual'); setHint('Re-initializing — hold still.'); } });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || S.mode === 'idle') return;
+  requestWakeLock();
+  if (S.mode === 'running') { reinit('resumed from background'); setHint('Back from background — hold still to re-initialize.', 'warn'); }
+});
+if (screen.orientation) screen.orientation.addEventListener('change', () => { updateCamera(); if (S.mode === 'running') reinit('orientation changed'); });
+
+// ------------------------------------------------------------------ frames
+function ensureProc() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return false;
+  const s = SET.procSize / Math.max(vw, vh), W = Math.round(vw * s), H = Math.round(vh * s);
+  if (W !== S.W || H !== S.H || !S.proc) {
+    S.W = W; S.H = H;
+    S.proc = document.createElement('canvas'); S.proc.width = W; S.proc.height = H;
+    S.pctx = S.proc.getContext('2d', { willReadFrequently: true });
+    $('view').style.aspectRatio = `${W} / ${H}`;
+    updateCamera(); reinit('video size ' + vw + 'x' + vh);
+  }
+  return true;
+}
+function grabFrame(tCam) {
+  if (!ensureProc()) return;
+  const { W, H, pctx } = S;
+  pctx.drawImage(video, 0, 0, W, H);
+  const img = pctx.getImageData(0, 0, W, H), d = img.data, g = new Float32Array(W * H);
+  for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+  S.frameQ.push({ t: tCam, gray: g, img, W, H, wall: performance.now() });
+  if (S.frameQ.length > 3) S.frameQ.shift();
+  pump();
+}
+function onVideoFrame(nowMs, meta) {
+  if (S.mode === 'idle') return;
+  video.requestVideoFrameCallback(onVideoFrame);
+  const t = (meta && (meta.captureTime || meta.expectedDisplayTime)) || nowMs;
+  grabFrame(t / 1000);
+}
+let lastVT = -1;
+function rafFrame(nowMs) {
+  if (S.mode === 'idle') return;
+  requestAnimationFrame(rafFrame);
+  if (video.currentTime !== lastVT) { lastVT = video.currentTime; grabFrame(nowMs / 1000); }
+}
+// process a frame once IMU data covering its timestamp has arrived (or it is 100 ms old)
+function pump() {
+  clearTimeout(S.pumpTimer);
+  while (S.frameQ.length) {
+    const fr = S.frameQ[0], tImu = fr.t + SET.td / 1000;
+    if (S.est.imu.lastT() < tImu && performance.now() - fr.wall < 100 && S.imuCount > 0) { S.pumpTimer = setTimeout(pump, 8); return; }
+    S.frameQ.shift();
+    try { processFrame(fr); } catch (e) { console.error(e); reinit('exception: ' + e.message); setHint('Internal error, re-initialized: ' + e.message, 'bad'); }
+  }
+}
+function processFrame(fr) {
+  const est = S.est, trk = S.trk, cam = est.cam;
+  if (!cam) return;
+  let predict = null;
+  if (S.prevT != null && SET.usePredict && S.mode === 'running') {
+    const dR = est.deltaRCam(S.prevT, fr.t), M = mtm(cam.Rbc, mtm(dR, cam.Rbc));
+    predict = (x, y) => { const q = mv(M, cam.bearing(x, y)); return q[2] > 0.2 ? [cam.f * q[0] / q[2] + cam.cx, cam.f * q[1] / q[2] + cam.cy] : null; };
+  }
+  const prevPos = S.mode === 'calibrating' ? new Map(trk.pts.map(q => [q.id, [q.x, q.y]])) : null;
+  const t0 = performance.now();
+  const tracks = trk.process(fr.gray, fr.W, fr.H, predict);
+  S.trackMs = performance.now() - t0;
+  if (S.mode === 'calibrating') {
+    if (S.prevT != null) {
+      const a = [], b = [];
+      for (const q of tracks) { const o = prevPos.get(q.id); if (o) { a.push(o[0], o[1]); b.push(q.x, q.y); } }
+      if (a.length >= 16) S.calib.pairs.push({ t0: S.prevT, t1: fr.t, a, b });
+    }
+    if (performance.now() - S.calib.start > 5000) finishCalib();
+  } else if (S.mode === 'running') {
+    const r = est.addFrame(fr.t, tracks);
+    if (r.kill.length) trk.kill(r.kill);
+    if (r.reset) { S.lastReset = r.reset; setHint(`Estimator reset (${r.reset}) — hold still to re-initialize.`, 'warn'); }
+    if (r.kf && est.status === 'tracking' && S.da3.on && S.da3.ready && !S.da3.busy) runDA3(est.lastKfId, fr.img);
+  }
+  S.prevT = fr.t; S.lastTracks = tracks; S.frames++;
+  drawView(tracks);
+}
+
+// ------------------------------------------------------------------ calibration
+$('bCalib').addEventListener('click', () => {
+  if (S.mode !== 'running') return;
+  const imu = new ImuBuf();
+  for (const s of S.est.imu.a) imu.push(s.t, s.w, s.a);
+  S.calib = { start: performance.now(), pairs: [], imu, bg: S.est.bias().slice() };
+  S.mode = 'calibrating'; S.trk.reset(); S.prevT = null;
+  setHint('Calibrating: rotate the phone in place (twist and tilt, don\'t walk) for 5 s.');
+});
+function finishCalib() {
+  const c = S.calib; S.mode = 'solving';
+  setHint('Solving calibration…');
+  setTimeout(() => {
+    let r = null;
+    try { r = VIO.calibrate(c.pairs, c.imu, { W: S.W, H: S.H, screenAngle: screenAngle(), bg: c.bg }); } catch (e) { console.error(e); }
+    S.calib = null;
+    if (!r) setHint('Calibration failed: not enough tracked motion. Try again with more rotation.', 'bad');
+    else if (r.rms > 0.7 * r.rmsNoComp) setHint(`Calibration inconclusive (residual ${r.rms.toFixed(2)} px vs ${r.rmsNoComp.toFixed(2)} px uncompensated). Rotate more and retry.`, 'warn');
+    else {
+      SET.fov = Math.round(r.fov * 10) / 10; SET.td = Math.round(r.td * 1000); SET.camOffset = r.offset;
+      lsSet(LS_CAL, { fov: SET.fov, td: SET.td, camOffset: SET.camOffset }); saveSettings(); renderSettings();
+      S.est.p.td = SET.td / 1000; updateCamera();
+      S.lastCalib = r;
+      setHint(`Calibrated: FOV ${SET.fov}°, td ${SET.td} ms, offset ${SET.camOffset}° · residual ${r.rms.toFixed(2)} px (was ${r.rmsNoComp.toFixed(1)} px). Hold still to initialize.`);
+    }
+    if (S.mode !== 'idle') { S.mode = 'running'; reinit('calibrated'); }
+  }, 30);
+}
+
+// ------------------------------------------------------------------ DA3 depth prior
+const DA3_LIB = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
+$('da3').addEventListener('change', e => { S.da3.on = e.target.checked; if (S.da3.on && !S.da3.ready && !S.da3.loading) loadDA3(); if (!S.da3.on && S.da3.ready) S.da3.status = 'ready (paused)'; });
+async function loadDA3() {
+  const st = S.da3; st.loading = true; st.status = 'loading library…';
+  try {
+    const T = await import(DA3_LIB);
+    if (!navigator.gpu) throw new Error('WebGPU not available in this browser');
+    st.status = 'loading model…';
+    st.pipe = await T.pipeline('depth-estimation', SET.da3Model, {
+      device: 'webgpu', dtype: 'fp16',
+      progress_callback: p => { if (p && p.status === 'progress' && p.total) st.status = `downloading ${Math.round(p.progress)}%`; },
+    });
+    st.RawImage = T.RawImage; st.ready = true; st.status = 'ready';
+  } catch (e) {
+    st.status = 'error: ' + (e.message || e); st.on = false; $('da3').checked = false;
+  }
+  st.loading = false;
+}
+function halfToFloat(u16) {
+  const out = new Float32Array(u16.length);
+  for (let i = 0; i < u16.length; i++) {
+    const h = u16[i], s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, m = h & 1023;
+    out[i] = e === 0 ? s * 5.960464477539063e-8 * m : e === 31 ? (m ? NaN : s * Infinity) : s * Math.pow(2, e - 15) * (1 + m / 1024);
+  }
+  return out;
+}
+async function runDA3(kfId, img) {
+  const st = S.da3; st.busy = true;
+  const t0 = performance.now();
+  try {
+    const n = img.width * img.height, rgb = new Uint8ClampedArray(3 * n);
+    for (let i = 0; i < n; i++) { rgb[3 * i] = img.data[4 * i]; rgb[3 * i + 1] = img.data[4 * i + 1]; rgb[3 * i + 2] = img.data[4 * i + 2]; }
+    const out = await st.pipe(new st.RawImage(rgb, img.width, img.height, 3));
+    const r = Array.isArray(out) ? out[0] : out;
+    let data, dw, dh;
+    if (r.predicted_depth) {
+      const pd = r.predicted_depth, dims = pd.dims;
+      dh = dims[dims.length - 2]; dw = dims[dims.length - 1];
+      data = pd.data instanceof Float32Array ? pd.data : (pd.type === 'float16' && pd.data instanceof Uint16Array) ? halfToFloat(pd.data) : Float32Array.from(pd.data);
+    } else { const d = r.depth; dw = d.width; dh = d.height; data = Float32Array.from(d.data); }
+    const res = S.est.addDepthMap(kfId, data, dw, dh);
+    const da = S.est.da3;
+    st.status = res && res.ok ? `${da.mode} · s=${da.scale.toPrecision(3)} · err ${(100 * da.err).toFixed(0)}%` : `aligning… (${res ? (res.n != null ? res.n + ' pts' : 'err ' + (100 * (res.err || 0)).toFixed(0) + '%') : 'kf gone'})`;
+  } catch (e) { st.status = 'error: ' + (e.message || e); }
+  st.ms = performance.now() - t0; st.busy = false;
+}
+
+// ------------------------------------------------------------------ export
+$('bExport').addEventListener('click', () => $('exportBox').classList.toggle('open'));
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type: type || 'text/plain' }));
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+$('eTum').addEventListener('click', () => {
+  const tr = S.est.traj;
+  if (!tr.length) { setHint('Nothing to export yet.', 'warn'); return; }
+  const lines = ['# Pocket VIO keyframe trajectory (TUM): timestamp x y z qx qy qz qw — IMU/device frame in world (z up)'];
+  for (const e of tr) {
+    const t = (performance.timeOrigin + e.t * 1000) / 1000, q = quatFromR(e.R);
+    lines.push([t.toFixed(6), ...e.p.map(v => v.toFixed(5)), ...q.map(v => v.toFixed(7))].join(' '));
+  }
+  download(`pocketvio_traj_${stamp()}.txt`, lines.join('\n') + '\n');
+});
+$('ePly').addEventListener('click', () => {
+  const pts = S.est.mapPts.concat(S.est.windowLandmarks());
+  if (!pts.length) { setHint('No map points yet.', 'warn'); return; }
+  const head = ['ply', 'format ascii 1.0', 'comment Pocket VIO map points (world, z up, metres)', `element vertex ${pts.length}`, 'property float x', 'property float y', 'property float z', 'end_header'];
+  download(`pocketvio_map_${stamp()}.ply`, head.join('\n') + '\n' + pts.map(p => p.map(v => v.toFixed(4)).join(' ')).join('\n') + '\n');
+});
+
+// ------------------------------------------------------------------ drawing helpers
+let C = {};
+function readColors() { const cs = getComputedStyle(document.documentElement); for (const k of ['text', 'muted', 'grid', 'traj', 'lm', 'pts', 'frustum', 'warn', 'accent', 'surface-2', 'bad']) C[k] = cs.getPropertyValue('--' + k).trim(); }
+readColors();
+if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors);
+function fitCanvas(cv) {
+  const dpr = Math.min(2.5, window.devicePixelRatio || 1), w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  return dpr;
+}
+function drawView(tracks) {
+  const cv = $('view'); fitCanvas(cv);
+  const ctx = cv.getContext('2d'), w = cv.width, h = cv.height;
+  ctx.drawImage(video, 0, 0, w, h);
+  const s = w / S.W, r = Math.max(2, 2.2 * (window.devicePixelRatio || 1));
+  for (const q of tracks) {
+    ctx.fillStyle = S.est.isLandmark(q.id) ? C.lm : C.warn;
+    ctx.beginPath(); ctx.arc(q.x * s, q.y * s, r, 0, 6.2832); ctx.fill();
+  }
+}
+
+// ------------------------------------------------------------------ 3D map
+const MV = { yaw: -2.2, pitch: 0.55, dist: 5, target: [0, 0, 0], follow: true };
+const mapCv = $('map'), ptrs = new Map();
+mapCv.addEventListener('pointerdown', e => { mapCv.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, [e.clientX, e.clientY]); });
+mapCv.addEventListener('pointermove', e => {
+  const prev = ptrs.get(e.pointerId); if (!prev) return;
+  const cur = [e.clientX, e.clientY];
+  if (ptrs.size === 1) {
+    MV.yaw -= (cur[0] - prev[0]) * 0.008;
+    MV.pitch = Math.max(-1.45, Math.min(1.5, MV.pitch + (cur[1] - prev[1]) * 0.008));
+    $('mTop').setAttribute('aria-pressed', 'false');
+  } else if (ptrs.size === 2) {
+    const other = [...ptrs.entries()].find(([id]) => id !== e.pointerId)[1];
+    const d0 = Math.hypot(prev[0] - other[0], prev[1] - other[1]), d1 = Math.hypot(cur[0] - other[0], cur[1] - other[1]);
+    if (d0 > 4 && d1 > 4) MV.dist = Math.max(0.3, Math.min(500, MV.dist * d0 / d1));
+  }
+  ptrs.set(e.pointerId, cur);
+});
+const endPtr = e => ptrs.delete(e.pointerId);
+mapCv.addEventListener('pointerup', endPtr); mapCv.addEventListener('pointercancel', endPtr);
+mapCv.addEventListener('wheel', e => { e.preventDefault(); MV.dist = Math.max(0.3, Math.min(500, MV.dist * Math.exp(e.deltaY * 0.0012))); }, { passive: false });
+$('mFollow').addEventListener('click', () => { MV.follow = !MV.follow; $('mFollow').setAttribute('aria-pressed', String(MV.follow)); });
+$('mTop').addEventListener('click', () => { MV.pitch = 1.5; $('mTop').setAttribute('aria-pressed', 'true'); });
+$('mFit').addEventListener('click', () => {
+  const P = S.est.traj.map(e => e.p).concat(S.est.windowLandmarks());
+  const mp = S.est.mapPts; for (let i = 0; i < mp.length; i += Math.ceil(mp.length / 2000) || 1) P.push(mp[i]);
+  if (!P.length) return;
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of P) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
+  MV.target = scl3(add3(lo, hi), 0.5);
+  MV.dist = Math.max(1, 0.5 * norm3(sub3(hi, lo)) / Math.tan(Math.PI / 6) * 1.1);
+  MV.follow = false; $('mFollow').setAttribute('aria-pressed', 'false');
+});
+function drawMap() {
+  const dpr = fitCanvas(mapCv), ctx = mapCv.getContext('2d'), w = mapCv.width, h = mapCv.height, est = S.est;
+  ctx.clearRect(0, 0, w, h);
+  if (MV.follow && est.pose && est.status === 'tracking') MV.target = add3(MV.target, scl3(sub3(est.pose.p, MV.target), 0.15));
+  const cp = Math.cos(MV.pitch);
+  const eye = add3(MV.target, [MV.dist * cp * Math.cos(MV.yaw), MV.dist * cp * Math.sin(MV.yaw), MV.dist * Math.sin(MV.pitch)]);
+  const fw = scl3(sub3(MV.target, eye), 1 / MV.dist);
+  let rt = cross3(fw, [0, 0, 1]); const rn = norm3(rt); rt = rn > 1e-6 ? scl3(rt, 1 / rn) : [1, 0, 0];
+  const up = cross3(rt, fw), F = 0.5 * h / Math.tan(Math.PI / 6), cx = w / 2, cy = h / 2;
+  const P = X => { const d = sub3(X, eye), z = dot3(d, fw); if (z < 0.05) return null; return [cx + F * dot3(d, rt) / z, cy - F * dot3(d, up) / z, z]; };
+  const line = (A, B) => { const a = P(A), b = P(B); if (!a || !b) return; ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); };
+  // grid (z = 0, 1 m)
+  const gs = MV.dist > 40 ? 10 : 1, N = 12, gx = Math.round(MV.target[0] / gs) * gs, gy = Math.round(MV.target[1] / gs) * gs;
+  ctx.strokeStyle = C.grid; ctx.lineWidth = dpr; ctx.beginPath();
+  for (let i = -N; i <= N; i++) { line([gx + i * gs, gy - N * gs, 0], [gx + i * gs, gy + N * gs, 0]); line([gx - N * gs, gy + i * gs, 0], [gx + N * gs, gy + i * gs, 0]); }
+  ctx.stroke();
+  $('mapLegend').textContent = `grid ${gs} m · z up`;
+  // world axes
+  for (const [d, col] of [[[0.5, 0, 0], C.bad], [[0, 0.5, 0], C.lm], [[0, 0, 0.5], C.traj]]) { ctx.strokeStyle = col; ctx.lineWidth = 2 * dpr; ctx.beginPath(); line([0, 0, 0], d); ctx.stroke(); }
+  // accumulated map points
+  const mp = est.mapPts, stp = Math.max(1, Math.ceil(mp.length / 8000)), ps = 1.6 * dpr;
+  ctx.fillStyle = C.pts;
+  for (let i = 0; i < mp.length; i += stp) { const q = P(mp[i]); if (q) ctx.fillRect(q[0] - ps / 2, q[1] - ps / 2, ps, ps); }
+  // window landmarks
+  ctx.fillStyle = C.lm;
+  for (const X of est.windowLandmarks()) { const q = P(X); if (q) { ctx.beginPath(); ctx.arc(q[0], q[1], 2.2 * dpr, 0, 6.2832); ctx.fill(); } }
+  // trajectory
+  const tr = est.traj;
+  ctx.strokeStyle = C.traj; ctx.lineWidth = 2 * dpr; ctx.beginPath();
+  let started = false;
+  for (const e of tr) { const q = P(e.p); if (!q) { started = false; continue; } if (!started) { ctx.moveTo(q[0], q[1]); started = true; } else ctx.lineTo(q[0], q[1]); }
+  if (est.pose && est.status === 'tracking') { const q = P(est.pose.p); if (q && started) ctx.lineTo(q[0], q[1]); }
+  ctx.stroke();
+  ctx.fillStyle = C.traj;
+  for (const k of est.kfs) { const q = P(k.p); if (q) { ctx.beginPath(); ctx.arc(q[0], q[1], 3 * dpr, 0, 6.2832); ctx.fill(); } }
+  // live camera frustum (IMU-propagated "next guess")
+  if (est.pose && est.cam && est.status === 'tracking') {
+    const cam = est.cam, R = est.pose.R, p = est.pose.p, s = 0.18, hw = cam.W / (2 * cam.f), hh = cam.H / (2 * cam.f);
+    const cw = c => add3(mv(R, mv(cam.Rbc, scl3(c, s))), p);
+    const k = [cw([-hw, -hh, 1]), cw([hw, -hh, 1]), cw([hw, hh, 1]), cw([-hw, hh, 1])];
+    ctx.strokeStyle = C.frustum; ctx.lineWidth = 1.8 * dpr; ctx.beginPath();
+    for (let i = 0; i < 4; i++) { line(p, k[i]); line(k[i], k[(i + 1) % 4]); }
+    line(k[0], k[1]); ctx.stroke();
+    ctx.fillStyle = C.frustum; const tq = P(add3(k[0], scl3(sub3(k[1], k[0]), 0.5))); if (tq) { ctx.beginPath(); ctx.arc(tq[0], tq[1], 2.5 * dpr, 0, 6.28); ctx.fill(); }
+  }
+}
+
+// ------------------------------------------------------------------ readouts
+const f2 = (v, n = 2) => Number.isFinite(v) ? v.toFixed(n) : '–';
+const vec = (v, n = 2) => v ? v.map(x => f2(x, n)).join(' ') : '–';
+const RO = [
+  ['fps', () => f2(S.fps, 1) + ` · klt ${f2(S.trackMs, 0)}ms`],
+  ['IMU rate', () => `${f2(S.imuRate, 0)} Hz · ${S.imuSrc}`],
+  ['tracks', () => String(S.lastTracks.length)],
+  ['landmarks', () => `${S.est.nLm || 0} win · ${S.est.mapPts.length} map`],
+  ['keyframes', () => `${S.est.kfs.length} win · ${S.est.traj.length} total`],
+  ['solve', () => `${f2(S.est.solveMs, 0)} ms · ${S.est.lastIters || 0} it`],
+  ['position (m)', () => S.est.pose ? vec(S.est.pose.p) : '–'],
+  ['speed', () => S.est.pose ? f2(norm3(S.est.pose.v)) + ' m/s' : '–'],
+  ['path length', () => f2(S.est.pathLength()) + ' m'],
+  ['gyro bias (rad/s)', () => vec(S.est.kfs.length ? S.est.kfs[S.est.kfs.length - 1].bg : S.est.bias(), 3)],
+  ['accel bias (m/s²)', () => S.est.kfs.length ? vec(S.est.kfs[S.est.kfs.length - 1].ba, 2) : '–'],
+  ['FOV / td / offset', () => `${f2(SET.fov, 1)}° / ${SET.td} ms / ${SET.camOffset}°`],
+  ['DA3', () => S.da3.status + (S.da3.ms ? ` · ${f2(S.da3.ms, 0)}ms` : '')],
+  ['last reset', () => S.lastReset || '–'],
+];
+$('ro').innerHTML = RO.map(([k], i) => `<div class="ro"><b>${k}</b><span id="ro${i}">–</span></div>`).join('');
+let lastCount = { t: performance.now(), imu: 0, frames: 0 };
+function updateReadouts() {
+  const t = performance.now(), dt = (t - lastCount.t) / 1000;
+  if (dt >= 1) { S.imuRate = (S.imuCount - lastCount.imu) / dt; S.fps = (S.frames - lastCount.frames) / dt; lastCount = { t, imu: S.imuCount, frames: S.frames }; }
+  RO.forEach(([, fn], i) => { $('ro' + i).textContent = fn(); });
+  $('da3Status').textContent = S.da3.status;
+  const st = S.mode === 'idle' ? 'idle' : (S.mode === 'calibrating' || S.mode === 'solving') ? 'calibrating' : S.est.status;
+  const chip = $('chip'); chip.className = 'chip ' + st; chip.textContent = st;
+  if (S.mode === 'running' && S.est.status === 'warmup' && !hintSticky()) {
+    const w = S.est.warm;
+    setHint(w ? `Hold still… gyro ${f2(w.gstd, 3)}/${S.est.p.staticGyro} rad/s · accel ${f2(w.astd, 3)}/${S.est.p.staticAcc} · tracks ${S.lastTracks.length}/${S.est.p.initTracks}` : 'Collecting IMU data… hold still.', '', true);
+  } else if (S.mode === 'running' && S.est.status === 'tracking' && !hintSticky()) {
+    const n = S.lastTracks.length;
+    setHint(n < 40 ? 'Few features — point at a more textured area.' : 'Tracking. Move smoothly; sideways translation makes scale observable.', n < 40 ? 'warn' : '', true);
+  } else if (S.mode === 'calibrating') {
+    setHint(`Calibrating: rotate the phone in place — ${Math.max(0, 5 - (performance.now() - S.calib.start) / 1000).toFixed(1)} s left · ${S.calib.pairs.length} frame pairs`, '', true);
+  }
+}
+let hintUntil = 0;
+const hintSticky = () => performance.now() < hintUntil;
+function setHint(text, kind, auto) {
+  const h = $('hint'); h.textContent = text; h.className = 'hint' + (kind ? ' ' + kind : '');
+  if (!auto) hintUntil = performance.now() + 4000;
+}
+
+// ------------------------------------------------------------------ settings UI
+function renderSettings() {
+  const groups = {};
+  for (const s of SCHEMA) (groups[s[2]] = groups[s[2]] || []).push(s);
+  $('settings').innerHTML = Object.entries(groups).map(([g, items]) => `<div class="sgroup"><h4>${g}</h4>` + items.map(([k, label, , def, step]) =>
+    typeof def === 'string'
+      ? `<div class="srow wide"><label for="s_${k}">${label}</label><input id="s_${k}" data-k="${k}" type="text" value="${SET[k]}"></div>`
+      : `<div class="srow"><label for="s_${k}">${label}</label><input id="s_${k}" data-k="${k}" type="number" inputmode="decimal" step="${step}" value="${SET[k]}"></div>`).join('') + '</div>').join('');
+}
+$('settings').addEventListener('change', e => {
+  const k = e.target.dataset.k; if (!k) return;
+  const sc = SCHEMA.find(s => s[0] === k);
+  const v = typeof sc[3] === 'string' ? e.target.value.trim() : Number(e.target.value);
+  if (typeof v === 'number' && !Number.isFinite(v)) return;
+  SET[k] = v; saveSettings();
+  if (['fov', 'td', 'camOffset'].includes(k)) lsSet(LS_CAL, { fov: SET.fov, td: SET.td, camOffset: SET.camOffset });
+  applySetting(sc);
+});
+function applySetting(sc) {
+  const [k, , , , , to] = sc;
+  if (to === 'est') { S.est.p[k] = k === 'td' ? SET.td / 1000 : SET[k]; }
+  else if (to === 'trk') { Object.assign(S.trk.p, trkParams()); if (k === 'levels' || k === 'win') S.trk.reset(); }
+  else if (to === 'cam') { if (k === 'procSize') S.proc = null; else updateCamera(); if (S.mode === 'running') reinit('camera setting changed'); }
+  else if (k === 'imuFreq' && S.mode !== 'idle') { stopSensors(); startSensors(); }
+  else if (k === 'da3Model') { S.da3.ready = false; S.da3.pipe = null; if (S.da3.on) loadDA3(); }
+}
+$('sDefaults').addEventListener('click', () => {
+  for (const s of SCHEMA) SET[s[0]] = s[3];
+  saveSettings(); lsSet(LS_CAL, { fov: SET.fov, td: SET.td, camOffset: SET.camOffset }); renderSettings();
+  S.est = newEstimator(); S.trk = new Tracker(trkParams()); S.proc = null;
+});
+renderSettings();
+
+// ------------------------------------------------------------------ main UI loop
+let lastRo = 0;
+function uiLoop(t) {
+  requestAnimationFrame(uiLoop);
+  drawMap();
+  if (t - lastRo > 250) { lastRo = t; updateReadouts(); }
+}
+requestAnimationFrame(uiLoop);
+if (!window.isSecureContext) { setHint('This page is not a secure context — camera and motion sensors will be blocked. Serve it over HTTPS or http://localhost.', 'bad'); diagnose(); }
+})();
+</script>
+</body>
+</html>
