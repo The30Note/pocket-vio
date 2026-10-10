@@ -100,6 +100,7 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
 .srow.wide { grid-template-columns: 1fr; }
 .diag { font: 12px/1.5 var(--mono); color: var(--muted); word-break: break-word; white-space: pre-wrap; }
 .diag:empty { display: none; }
+.da3log { display: none; margin: 0; padding: 0 14px 12px; font-size: 11px; max-height: 40vh; overflow: auto; }
 .foot { color: var(--muted); font-size: 12px; }
 @media (max-width: 420px) { .controls button { font-size: 13px; padding: 10px 2px; } }
 </style>
@@ -129,7 +130,7 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
     <button id="eTum">Trajectory (TUM .txt)</button>
     <button id="ePly">Map points (PLY)</button>
   </div>
-  <label class="card toggle"><input type="checkbox" id="da3"> <span style="white-space:nowrap">DA3 depth prior</span> <span class="sub" id="da3Status">off</span></label>
+  <div class="card"><label class="toggle"><input type="checkbox" id="da3"> <span style="white-space:nowrap">DA3 depth prior</span> <span class="sub" id="da3Status">off</span></label><pre class="diag da3log" id="da3Log"></pre></div>
   <section class="card map">
     <canvas id="map"></canvas>
     <div class="mapbtns">
@@ -1260,7 +1261,10 @@ const SCHEMA = [
   ['maxSpeed', 'Reset if speed above (m/s)', 'Safety', D.maxSpeed, 1, 'est'],
   ['maxBg', 'Reset if |gyro bias| above (rad/s)', 'Safety', D.maxBg, 0.05, 'est'],
   ['maxBa', 'Reset if |accel bias| above (m/s²)', 'Safety', D.maxBa, 0.1, 'est'],
-  ['da3Model', 'DA3 model id', 'Depth prior', 'onnx-community/depth-anything-v3-small', 0, 'app'],
+  ['da3Model', 'DA3 model: HF repo id, base URL, or direct .onnx URL', 'Depth prior', 'onnx-community/depth-anything-v3-small', 0, 'app'],
+  ['da3File', 'DA3 file in repo (auto = pick by backend)', 'Depth prior', 'auto', 0, 'app'],
+  ['da3Backend', 'DA3 backend: auto | webgpu | wasm', 'Depth prior', 'auto', 0, 'app'],
+  ['da3Size', 'DA3 input long side (px, multiple of 14)', 'Depth prior', 336, 14, 'app'],
 ];
 const DEF = Object.fromEntries(SCHEMA.map(s => [s[0], s[3]]));
 const lsGet = k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
@@ -1274,7 +1278,7 @@ const S = {
   W: 0, H: 0, proc: null, pctx: null, frameQ: [], prevT: null, pumpTimer: 0,
   imuCount: 0, imuRate: 0, frames: 0, fps: 0, trackMs: 0, lastTracks: [], imuSrc: '-',
   calib: null, lastCalib: null, lastReset: '', vfcSupported: 'requestVideoFrameCallback' in HTMLVideoElement.prototype,
-  da3: { on: false, ready: false, loading: false, busy: false, status: 'off', pipe: null, RawImage: null, ms: 0, runs: 0, aligned: 0, lastRun: 0 },
+  da3: { on: false, ready: false, loading: false, busy: false, status: 'off', eng: null, ms: 0, runs: 0, aligned: 0, lastRun: 0 },
 };
 const video = $('video');
 const newEstimator = () => {
@@ -1516,53 +1520,43 @@ function finishCalib() {
 }
 
 // ------------------------------------------------------------------ DA3 depth prior
-// Every stage is reported in the DA3 status line; the latest depth map is drawn as
-// an inset on the camera view, and landmarks carrying a DA3 prior are drawn purple.
-const DA3_LIB = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0';
+// The ONNX model runs directly on ONNX Runtime Web (WebGPU, falling back to WASM).
+// Every stage has a timeout and is reported in the status line and the DA3 log;
+// the model file is cached in Cache Storage so it only downloads once.
+const ORT_VER = '1.30.0', ORT_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VER}/dist/`;
+const MODEL_CACHE = 'pocketvio-models-v1';
 $('da3').addEventListener('change', e => { S.da3.on = e.target.checked; if (S.da3.on && !S.da3.ready && !S.da3.loading) loadDA3(); if (!S.da3.on && S.da3.ready) S.da3.status = 'ready (paused)'; });
-async function loadDA3() {
-  const st = S.da3; st.loading = true; st.error = ''; st.status = 'loading Transformers.js…';
-  let tick = 0;
-  try {
-    const T = await import(DA3_LIB);
-    if (!navigator.gpu) throw new Error('WebGPU not available in this browser');
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error('WebGPU has no adapter (check chrome://gpu)');
-    const files = {};
-    const t0 = performance.now();
-    const progress = p => {
-      if (!p) return;
-      if (p.status === 'progress' && p.file) {
-        files[p.file] = p.progress || 0;
-        const v = Object.values(files), avg = v.reduce((a, b) => a + b, 0) / v.length;
-        st.status = avg < 99.9 ? `downloading ${Math.round(avg)}% (${v.length} file${v.length > 1 ? 's' : ''})` : 'building WebGPU session…';
-      } else if (p.status === 'done' && Object.values(files).every(x => x >= 99.9)) st.status = 'building WebGPU session…';
-    };
-    // session build has no progress events: show elapsed time so it never looks frozen
-    tick = setInterval(() => { if (/session|fp32/.test(st.status)) st.status = st.status.replace(/ \d+ s$/, '') + ` ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
-    const load = dtype => T.pipeline('depth-estimation', SET.da3Model, { device: 'webgpu', dtype, progress_callback: progress });
-    try { st.pipe = await load('fp16'); st.dtype = 'fp16'; }
-    catch (e16) {
-      console.warn('DA3 fp16 failed', e16);
-      st.status = `fp16 failed (${e16.message}); trying fp32…`;
-      st.pipe = await load('fp32'); st.dtype = 'fp32';
-    }
-    st.RawImage = T.RawImage;
-    clearInterval(tick);
-    // test inference so a broken model shows up now, not at the first keyframe
-    st.status = 'test inference…';
-    const img = S.pctx && S.W ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(64, 48);
-    const t1 = performance.now();
-    const r = await inferDepth(img);
-    st.ready = true;
-    st.status = `ready (${st.dtype}) · test ${Math.round(performance.now() - t1)} ms · ${r.dw}×${r.dh}`;
-  } catch (e) {
-    console.error('DA3 load failed', e);
-    st.error = e.message || String(e);
-    st.status = 'error: ' + st.error; st.on = false; $('da3').checked = false;
+const da3Log = [];
+function dlog(msg) {
+  da3Log.push(`${(performance.now() / 1000).toFixed(1)}s ${msg}`);
+  console.log('[DA3]', msg);
+  const el = $('da3Log'); el.textContent = da3Log.slice(-14).join('\n'); el.style.display = 'block';
+}
+function withTimeout(p, ms, what) {
+  let t; return Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000} s`)), ms); })]).finally(() => clearTimeout(t));
+}
+async function urlExists(url) {
+  try { const r = await fetch(url, { method: 'HEAD' }); return r.ok; } catch (e) { return false; }
+}
+async function fetchCached(url, onProg) {
+  let cache = null;
+  try { cache = await caches.open(MODEL_CACHE); const hit = await cache.match(url); if (hit) { const b = new Uint8Array(await hit.arrayBuffer()); onProg(1, b.length, true); return b; } } catch (e) { cache = null; }
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`);
+  const total = Number(res.headers.get('content-length')) || 0, reader = res.body.getReader(), parts = [];
+  let got = 0;
+  for (;;) { const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length; onProg(total ? got / total : NaN, got, false); }
+  const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+  if (cache) { try { await cache.put(url, new Response(buf)); } catch (e) { dlog('could not cache model: ' + e.message); } }
+  return buf;
+}
+function floatToHalf(f32) {
+  const out = new Uint16Array(f32.length), fv = new Float32Array(1), iv = new Uint32Array(fv.buffer);
+  for (let i = 0; i < f32.length; i++) {
+    fv[0] = f32[i]; const x = iv[0], s = (x >>> 16) & 0x8000, e = ((x >>> 23) & 0xff) - 127 + 15, m = x & 0x7fffff;
+    out[i] = e <= 0 ? s : e >= 31 ? s | 0x7c00 : s | (e << 10) | (m >>> 13);
   }
-  clearInterval(tick);
-  st.loading = false;
+  return out;
 }
 function halfToFloat(u16) {
   const out = new Float32Array(u16.length);
@@ -1572,21 +1566,120 @@ function halfToFloat(u16) {
   }
   return out;
 }
+const mb = n => (n / 1048576).toFixed(1) + ' MB';
+async function loadDA3() {
+  const st = S.da3; st.loading = true; st.ready = false; st.error = '';
+  let tick = 0, stage = '', t0 = performance.now();
+  const setStage = s => { stage = s; t0 = performance.now(); st.status = s; };
+  tick = setInterval(() => { if (stage) st.status = `${stage} ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
+  try {
+    setStage('loading ONNX Runtime…');
+    const ort = await withTimeout(import(ORT_BASE + 'ort.webgpu.min.mjs'), 60000, 'ONNX Runtime import');
+    ort.env.wasm.wasmPaths = ORT_BASE;
+    ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 2) : 1;
+    let adapter = null, f16 = false;
+    if (navigator.gpu) {
+      try { adapter = await withTimeout(navigator.gpu.requestAdapter(), 10000, 'WebGPU adapter'); } catch (e) { dlog(e.message); }
+      if (adapter) {
+        f16 = adapter.features.has('shader-f16');
+        const info = adapter.info || {};
+        dlog(`WebGPU adapter: ${info.vendor || '?'} ${info.architecture || ''} ${info.description || ''} · shader-f16=${f16}`);
+      } else dlog('WebGPU: no adapter');
+    } else dlog('WebGPU: navigator.gpu missing');
+    const want = SET.da3Backend;
+    const backends = want === 'wasm' ? ['wasm'] : want === 'webgpu' ? ['webgpu'] : adapter ? ['webgpu', 'wasm'] : ['wasm'];
+    const id = SET.da3Model.trim();
+    const direct = /^https?:\/\/.*\.onnx(\?.*)?$/.test(id);
+    const base = direct ? id.replace(/[^/]*$/, '') : /^https?:/.test(id) ? id.replace(/\/$/, '') + '/' : `https://huggingface.co/${id}/resolve/main/`;
+    // normalisation from preprocessor_config.json when available
+    let mean = [0.485, 0.456, 0.406], std = [0.229, 0.224, 0.225];
+    if (!direct) {
+      try { const pc = await (await withTimeout(fetch(base + 'preprocessor_config.json'), 15000, 'preprocessor config')).json();
+        if (pc.image_mean) mean = pc.image_mean; if (pc.image_std) std = pc.image_std; dlog(`preprocessor: mean=${mean} std=${std}`); }
+      catch (e) { dlog('no preprocessor_config.json, using ImageNet mean/std'); }
+    }
+    let lastErr = null;
+    for (const be of backends) {
+      const files = direct ? [id] : SET.da3File !== 'auto' ? [base + SET.da3File]
+        : be === 'webgpu' ? (f16 ? ['onnx/model_fp16.onnx', 'onnx/model.onnx'] : ['onnx/model.onnx', 'onnx/model_fp16.onnx']).map(f => base + f)
+        : ['onnx/model_quantized.onnx', 'onnx/model_int8.onnx', 'onnx/model.onnx'].map(f => base + f);
+      try {
+        setStage(`finding model file (${be})…`);
+        let url = null;
+        for (const f of files) { if (files.length === 1 || await urlExists(f)) { url = f; break; } dlog('not found: ' + f); }
+        if (!url) throw new Error('no model file found (tried ' + files.map(f => f.split('/').pop()).join(', ') + ')');
+        const name = url.split('/').pop().split('?')[0];
+        stage = '';
+        const buf = await fetchCached(url, (fr, n, cached) => { st.status = cached ? `model from cache (${mb(n)})` : `downloading ${name} ${Number.isFinite(fr) ? Math.round(100 * fr) + '%' : mb(n)}`; });
+        dlog(`model ${name}: ${mb(buf.length)}`);
+        const opts = { executionProviders: [be === 'webgpu' ? { name: 'webgpu' } : 'wasm'], graphOptimizationLevel: 'all' };
+        const extUrl = url.replace(/\.onnx(\?.*)?$/, '.onnx_data');
+        if (await urlExists(extUrl)) {
+          stage = '';
+          const ext = await fetchCached(extUrl, (fr, n, cached) => { st.status = cached ? 'weights from cache' : `downloading weights ${Number.isFinite(fr) ? Math.round(100 * fr) + '%' : mb(n)}`; });
+          opts.externalData = [{ path: name + '_data', data: ext }];
+          dlog(`external weights: ${mb(ext.length)}`);
+        }
+        setStage(`creating ${be} session…`);
+        const sess = await withTimeout(ort.InferenceSession.create(buf, opts), be === 'webgpu' ? 60000 : 120000, `${be} session creation`);
+        const im = sess.inputMetadata && sess.inputMetadata[0];
+        const shape = im && im.shape ? Array.from(im.shape) : null, type = (im && im.type) || 'float32';
+        dlog(`session ok on ${be} in ${((performance.now() - t0) / 1000).toFixed(1)} s · input ${sess.inputNames[0]} [${shape || '?'}] ${type} · outputs ${sess.outputNames.join(', ')}`);
+        const eng = { ort, sess, be, inName: sess.inputNames[0], rank: shape ? shape.length : 4, type, mean, std,
+          fixedH: shape && typeof shape[shape.length - 2] === 'number' && shape[shape.length - 2] > 0 ? shape[shape.length - 2] : 0,
+          fixedW: shape && typeof shape[shape.length - 1] === 'number' && shape[shape.length - 1] > 0 ? shape[shape.length - 1] : 0,
+          outName: sess.outputNames.find(n => /depth|predicted/i.test(n) && !/conf|sky|ray/i.test(n)) || sess.outputNames[0], file: name };
+        st.eng = eng;
+        // first run compiles the GPU shaders: time-box it separately
+        setStage(`first inference on ${be} (compiling)…`);
+        const img = S.pctx && S.W ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(270, 360);
+        const tt = performance.now();
+        const r = await withTimeout(inferDepth(img), be === 'webgpu' ? 90000 : 180000, `first ${be} inference`);
+        dlog(`first inference ${Math.round(performance.now() - tt)} ms · output ${eng.outName} ${r.dw}×${r.dh}`);
+        const t2 = performance.now(); await inferDepth(img); const warm = Math.round(performance.now() - t2);
+        dlog(`warm inference ${warm} ms`);
+        stage = ''; st.ready = true; st.status = `ready · ${be} · ${name} · ${warm} ms/frame`;
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e; st.eng = null; dlog(`${be} failed: ${e.message || e}`);
+        if (be !== backends[backends.length - 1]) dlog('falling back to next backend');
+      }
+    }
+    if (lastErr) throw lastErr;
+  } catch (e) {
+    console.error('DA3 load failed', e);
+    st.error = e.message || String(e);
+    st.status = 'error: ' + st.error; st.on = false; $('da3').checked = false;
+  }
+  clearInterval(tick);
+  st.loading = false;
+}
 // run the model on an ImageData, keep the result for the inset view
 async function inferDepth(img) {
-  const st = S.da3, n = img.width * img.height, rgb = new Uint8ClampedArray(3 * n);
-  for (let i = 0; i < n; i++) { rgb[3 * i] = img.data[4 * i]; rgb[3 * i + 1] = img.data[4 * i + 1]; rgb[3 * i + 2] = img.data[4 * i + 2]; }
-  const out = await st.pipe(new st.RawImage(rgb, img.width, img.height, 3));
-  const r = Array.isArray(out) ? out[0] : out;
-  let data, dw, dh;
-  if (r && r.predicted_depth) {
-    const pd = r.predicted_depth, dims = pd.dims;
-    dh = dims[dims.length - 2]; dw = dims[dims.length - 1];
-    data = pd.data instanceof Float32Array ? pd.data : (pd.type === 'float16' && pd.data instanceof Uint16Array) ? halfToFloat(pd.data) : Float32Array.from(pd.data);
-  } else if (r && r.depth) { const d = r.depth; dw = d.width; dh = d.height; data = Float32Array.from(d.data); }
-  else throw new Error('model returned no depth output');
+  const st = S.da3, eng = st.eng;
+  if (!eng) throw new Error('DA3 engine not loaded');
+  let W = eng.fixedW, H = eng.fixedH;
+  if (!W || !H) {
+    const L = Math.max(14, Math.round(SET.da3Size / 14) * 14), a = img.width / img.height;
+    if (a >= 1) { W = L; H = Math.max(14, Math.round(L / a / 14) * 14); } else { H = L; W = Math.max(14, Math.round(L * a / 14) * 14); }
+  }
+  if (!st.src) { st.src = document.createElement('canvas'); st.dst = document.createElement('canvas'); }
+  st.src.width = img.width; st.src.height = img.height; st.src.getContext('2d').putImageData(img, 0, 0);
+  st.dst.width = W; st.dst.height = H;
+  const dctx = st.dst.getContext('2d', { willReadFrequently: true });
+  dctx.drawImage(st.src, 0, 0, W, H);
+  const px = dctx.getImageData(0, 0, W, H).data, n = W * H, chw = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) chw[c * n + i] = (px[4 * i + c] / 255 - eng.mean[c]) / eng.std[c];
+  const dims = eng.rank === 5 ? [1, 1, 3, H, W] : [1, 3, H, W];
+  const tensor = eng.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(chw) : floatToHalf(chw), dims) : new eng.ort.Tensor('float32', chw, dims);
+  const out = await eng.sess.run({ [eng.inName]: tensor });
+  const o = out[eng.outName], od = o.dims, dh = od[od.length - 2], dw = od[od.length - 1];
+  let data = o.data;
+  data = data instanceof Float32Array ? data : (o.type === 'float16' && data instanceof Uint16Array) ? halfToFloat(data) : Float32Array.from(data);
+  if (data.length !== dw * dh) data = data.subarray(0, dw * dh); // e.g. extra depth/confidence channels
   let finite = 0; for (let i = 0; i < data.length; i += 7) if (Number.isFinite(data[i])) finite++;
-  if (!finite) throw new Error('depth output is all NaN/Inf (try dtype fp32)');
+  if (!finite) throw new Error('depth output is all NaN/Inf (try da3File onnx/model.onnx)');
   drawDepthInset(data, dw, dh);
   st.runs = (st.runs || 0) + 1;
   return { data, dw, dh };
@@ -1819,7 +1912,7 @@ function applySetting(sc) {
   else if (to === 'trk') { Object.assign(S.trk.p, trkParams()); if (k === 'levels' || k === 'win') S.trk.reset(); }
   else if (to === 'cam') { if (k === 'procSize') S.proc = null; else updateCamera(); if (S.mode === 'running') reinit('camera setting changed'); }
   else if (k === 'imuFreq' && S.mode !== 'idle') { stopSensors(); startSensors(); }
-  else if (k === 'da3Model') { S.da3.ready = false; S.da3.pipe = null; if (S.da3.on) loadDA3(); }
+  else if (k.startsWith('da3') && k !== 'da3Size') { S.da3.ready = false; S.da3.eng = null; if (S.da3.on && !S.da3.loading) loadDA3(); }
 }
 $('sDefaults').addEventListener('click', () => {
   for (const s of SCHEMA) SET[s[0]] = s[3];
