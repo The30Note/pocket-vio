@@ -154,10 +154,10 @@ button.small { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radi
         <p>Point at a textured scene, tap Calibrate, then rotate the phone in place (twist and tilt, don't walk) for 5 s. Solves FOV, camera↔IMU time offset and camera rotation.</p>
         <div class="row"><button id="ss_calib" class="primary">Calibrate</button></div><div class="res" id="res_calib"></div></li>
       <li><div class="sh"><b>5 · IMU rest check</b><span class="stchip" id="st_imu"></span></div>
-        <p>Lay the phone flat on a table, tap Measure and don't touch it for 3 s. Measures gyro bias (so scans can start while you're moving) and sensor noise.</p>
+        <p>Lay the phone flat on a table, tap Measure and don't touch it for 3 s. Measures gyro bias (used at the start of every scan) and sensor noise.</p>
         <div class="row"><button id="ss_imu">Measure</button><button id="ss_imuApply" hidden>Apply suggested noise</button></div><div class="res" id="res_imu"></div></li>
       <li><div class="sh"><b>6 · Scale test</b><span class="stchip" id="st_scale"></span></div>
-        <p>Scale of the walked path is the goal: walk a measured straight line (tape, floor tiles, ≥ 5 m) with the Walk scale test card and enter its true length. Results are kept per mode (VIO only / DA3 relative / DA3 metric).</p>
+        <p>Scale of the walked path is the goal: walk a measured straight line (tape, floor tiles, ≥ 5 m) with the Walk scale test card and enter its true length. Each result records the DA3 input size used.</p>
         <div class="row"><button id="ss_scale">Show walk test</button></div><div class="res" id="res_scale"></div></li>
     </ol>
     <div class="row setup-foot"><button id="setupCopy">Copy report</button><button id="setupFinish" class="primary">Finish</button></div>
@@ -547,16 +547,16 @@ const DEFAULTS = {
   sigmaPx: 1.5, huber: 2.0, window: 10, lmIters: 6,
   kfParallax: 10, kfTrackRatio: 0.6, kfMaxDt: 0.45, kfMinDt: 0.08,
   staticGyro: 0.05, staticAcc: 0.12, staticPx: 1.0,
-  initRest: 1.0, initTracks: 30,
+  initTracks: 30,
   minParallaxDeg: 1.0, outlierPx: 5, minDepth: 0.1, maxDepth: 50,
   priorBg: 0.005, priorBa: 0.1, priorV: 0.2,
   zuptV: 0.01, zuptP: 0.003, zuptR: 0.003,
   maxSpeed: 15, maxBg: 0.5, maxBa: 3,
   reintBg: 0.003, reintBa: 0.05,
   depthRel: 0.3, td: 0, maxMapPts: 40000,
-  da3ScaleSigma: 0.5,
-  dynamicInit: 1, dynInitV: 0.3, dynInitBg: 0.02, initBg: null,
-  initFrameDt: 0.15, initSpan: 1.0, initMinParallax: 6, initGravTol: 1.5, alignInitV: 0.5, initTimeout: 3.0,
+  da3ScaleSigma: 3,
+  initV: 1.0, initBgSigma: 0.02, initBg: null,
+  da3Inverse: 0, da3ScaleCons: 0.1, da3InitDepth: 2.0,
 };
 
 class Estimator {
@@ -571,12 +571,12 @@ class Estimator {
   startScan() { this.scanning = true; this.reset('scan start'); }
   stopScan() { this.scanning = false; this.status = 'idle'; }
   reset(reason) {
-    this.status = this.scanning ? 'warmup' : 'idle'; this.resetReason = reason || ''; this.warmStart = null; this.initMode = ''; this.initFrames = null; this.alignInfo = null; this.warmHist = null; this.initWhy = '';
+    this.status = this.scanning ? 'warmup' : 'idle'; this.resetReason = reason || ''; this.initWhy = '';
     this.kfs = []; this.kfById = new Map(); this.feats = new Map();
-    this.depthPriors = new Map(); this.mapScale = new Map(); this.da3 = { maps: 0, mode: '', scale: 0, err: 0, vote: 0, n: 0, vioRatio: NaN, ratios: [] };
+    this.depthPriors = new Map(); this.mapScale = new Map(); this.da3 = { maps: 0, mode: '', scale: NaN, err: NaN, vote: 0, n: 0, nTri: 0, inv: null };
     this.traj = []; this.trajById = new Map(); this.mapPts = [];
     this.pose = null; this.lastKfObs = new Map(); this.nextKf = 0;
-    this.solveMs = 0; this.lastCost = 0; this.lastIters = 0; this.warm = null; this.lastKfId = -1;
+    this.solveMs = 0; this.lastCost = 0; this.lastIters = 0; this.lastKfId = -1;
     this.resets++;
   }
   addImu(t, w, a) {
@@ -588,7 +588,7 @@ class Estimator {
   }
   bias() {
     if (this.kfs.length) return this.kfs[this.kfs.length - 1].bg;
-    return this.warm && this.warm.ok ? this.warm.wMean : [0, 0, 0];
+    return this.p.initBg || [0, 0, 0];
   }
   integrate(t0, t1, bg, ba, withCov) {
     const pre = new Preint(bg, ba), p = this.p;
@@ -606,17 +606,6 @@ class Estimator {
   deltaRCam(tc0, tc1) { return this.deltaR(tc0 + this.p.td, tc1 + this.p.td); }
   isLandmark(id) { const f = this.feats.get(id); return !!(f && f.lm); }
 
-  restStats(t) {
-    const p = this.p, S = this.imu.range(t - p.initRest, t);
-    if (S.length < 20 || S[0].t > t - p.initRest + 0.05) return null;
-    let wm = [0, 0, 0], am = [0, 0, 0], an = 0;
-    for (const s of S) { wm = add3(wm, s.w); am = add3(am, s.a); an += norm3(s.a); }
-    wm = scl3(wm, 1 / S.length); am = scl3(am, 1 / S.length); an /= S.length;
-    let gv = 0, av = 0;
-    for (const s of S) { const d = sub3(s.w, wm); gv += dot3(d, d); av += (norm3(s.a) - an) ** 2; }
-    const gstd = Math.sqrt(gv / S.length), astd = Math.sqrt(av / S.length);
-    return { ok: gstd < p.staticGyro && astd < p.staticAcc, wMean: wm, aMean: am, gstd, astd };
-  }
   isStatic(t0, t1, bg, pxMed) {
     const p = this.p, S = this.imu.range(t0, t1);
     if (S.length < 5) return false;
@@ -633,39 +622,11 @@ class Estimator {
     if (!this.cam) return out;
     if (this.status === 'idle') return out;
     if (this.status === 'warmup') {
-      if (this.warmStart == null) this.warmStart = t;
-      const rest = this.restStats(t); this.warm = rest;
-      // constant-velocity motion looks like rest to an IMU: require the image to be still too
-      const WH = this.warmHist || (this.warmHist = []);
-      WH.push({ t, pos: new Map(tracks.map(q => [q.id, [q.x, q.y]])) });
-      while (WH.length > 2 && WH[1].t <= t - p.initRest) WH.shift();
-      let still = false;
-      if (WH[0].t <= t - 0.8 * p.initRest) {
-        const d = []; for (const q of tracks) { const o = WH[0].pos.get(q.id); if (o) d.push(Math.hypot(q.x - o[0], q.y - o[1])); }
-        still = d.length >= 10 && median(d) < 2 * p.staticPx;
-      }
-      if (rest) rest.visualStill = still;
-      if (tracks.length < p.initTracks) { this.initWhy = `only ${tracks.length}/${p.initTracks} features — point at texture`; return out; }
-      if (rest && rest.ok && still) { this.initialize(t, tracks, rest, false); out.kf = true; }
-      else if (p.dynamicInit) {
-        // moving start: collect ~1 s of frames, then solve velocity/gravity/depths jointly
-        const C = this.initFrames || (this.initFrames = []);
-        if (!C.length || t - C[C.length - 1].t >= p.initFrameDt) C.push({ t, tracks: tracks.map(q => ({ id: q.id, x: q.x, y: q.y })) });
-        while (C.length > 1 && t - C[0].t > p.initSpan + 0.6) C.shift();
-        if (C.length < 5 || C[C.length - 1].t - C[0].t < p.initSpan) this.initWhy = `collecting frames (${C.length})`;
-        else {
-          const r = this.alignInit(C, out);
-          if (r === 'ok') { this.initFrames = null; out.kf = true; return out; }
-          // never wait forever: after initTimeout start anyway (velocity ~0, loose prior)
-          if ((r === 'static' && t - this.warmStart >= p.initSpan + 1.0) || (this.status === 'warmup' && t - this.warmStart >= p.initTimeout)) {
-            // hand-held but not translating: velocity ~ 0, gravity from the mean accel
-            const S = this.imu.range(t - 0.5, t); let am = [0, 0, 0]; for (const s of S) am = add3(am, s.a);
-            this.initFrames = null;
-            this.initialize(t, tracks, { aMean: scl3(am, 1 / S.length), wMean: p.initBg || [0, 0, 0] }, true); this.initMode = r === 'static' ? 'moving (no translation)' : 'fallback (alignment timed out)'; out.kf = true; return out;
-          }
-          if (r === 'fail' && this.status === 'warmup') C.shift();
-        }
-      }
+      // one pipeline, whether the phone is still or moving: the first frame with enough
+      // features becomes keyframe 0; DA3 seeds its depths and the window solves the rest
+      if (tracks.length < p.initTracks) { this.initWhy = `${tracks.length}/${p.initTracks} features — point at texture`; return out; }
+      if (this.imu.range(t - 0.3, t).length < 10) { this.initWhy = 'waiting for IMU data'; return out; }
+      this.initialize(t, tracks); out.kf = true;
       return out;
     }
     const last = this.kfs[this.kfs.length - 1];
@@ -693,105 +654,20 @@ class Estimator {
     return out;
   }
 
-  initialize(t, tracks, rest, moving) {
-    const a = rest.aMean;
+  // Keyframe 0: tilt from the mean specific force (refined later: only position and yaw are
+  // gauge-fixed), gyro bias from calibration, velocity unknown (loose prior).
+  initialize(t, tracks) {
+    const p = this.p, S = this.imu.range(t - 0.3, t);
+    let a = [0, 0, 0]; for (const s of S) a = add3(a, s.a); a = scl3(a, 1 / S.length);
     const roll = Math.atan2(a[1], a[2]), pitch = Math.atan2(-a[0], Math.hypot(a[1], a[2]));
-    const R = mm(Ry(pitch), Rx(roll));
-    const kf = { id: this.nextKf++, t, R, p: [0, 0, 0], v: [0, 0, 0], bg: rest.wMean.slice(), ba: [0, 0, 0], pre: null, stat: false,
-      priorBg: rest.wMean.slice(), priorBa: [0, 0, 0], priorV: [0, 0, 0],
-      priorVSigma: moving ? this.p.dynInitV : this.p.zuptV, priorBgSigma: moving ? this.p.dynInitBg : this.p.priorBg };
-    this.initMode = moving ? 'moving' : 'rest';
+    const R = mm(Ry(pitch), Rx(roll)), bg = (p.initBg || [0, 0, 0]).slice();
+    const kf = { id: this.nextKf++, t, R, p: [0, 0, 0], v: [0, 0, 0], bg, ba: [0, 0, 0], pre: null, stat: false,
+      priorBg: bg.slice(), priorBa: [0, 0, 0], priorV: [0, 0, 0], priorVSigma: p.initV, priorBgSigma: p.initBgSigma };
     this.kfs.push(kf); this.kfById.set(kf.id, kf);
     this.addObs(kf, tracks);
     this.status = 'tracking';
     this.pose = { t, R, p: [0, 0, 0], v: [0, 0, 0] };
     this.updateTraj(); this.lastKfId = kf.id;
-  }
-
-  // Moving start: closed-form visual-inertial alignment over ~1 s of frames C (Martinelli /
-  // VINS style). With rotations from the gyro and positions p_i = v0 t_i + g t_i^2/2 + R0 dp_i
-  // from preintegration, every observation of feature j gives
-  //   [m_ij]x (lambda_j mu_0j - v0 t_i - g t_i^2 / 2) = [m_ij]x R0 dp_i
-  // which is linear in v0, g and the depths lambda_j. Returns 'ok' | 'static' | 'fail'.
-  alignInit(C, out) {
-    const p = this.p, cam = this.cam, Rbc = cam.Rbc, bg = (p.initBg || [0, 0, 0]).slice(), ba = [0, 0, 0];
-    const t0 = C[0].t, A = this.imu.range(t0 - 0.25, t0 + 0.25);
-    if (A.length < 10) { this.initWhy = 'not enough IMU samples'; return 'fail'; }
-    let am = [0, 0, 0]; for (const s of A) am = add3(am, s.a); am = scl3(am, 1 / A.length);
-    const R0 = mm(Ry(Math.atan2(-am[0], Math.hypot(am[1], am[2]))), Rx(Math.atan2(am[1], am[2])));
-    const pre = C.map(c => this.integrate(t0, c.t, bg, ba, false));
-    const Ri = pre.map(q => mm(R0, q.dR)), Dp = pre.map(q => mv(R0, q.dp)), T = pre.map(q => q.T);
-    const f0 = new Map(C[0].tracks.map(q => [q.id, q])), obs = new Map();
-    for (let i = 1; i < C.length; i++) for (const q of C[i].tracks) if (f0.has(q.id)) { if (!obs.has(q.id)) obs.set(q.id, []); obs.get(q.id).push([i, q]); }
-    const ids = [...obs.keys()].filter(id => obs.get(id).length >= 2);
-    if (ids.length < 15) { this.initWhy = `only ${ids.length} features stayed tracked for 1 s — slow down, point at texture`; return 'fail'; }
-    // translation-induced (rotation-compensated) parallax decides whether alignment is observable
-    const mu0 = new Map(ids.map(id => { const q = f0.get(id); return [id, mv(R0, mv(Rbc, cam.bearing(q.x, q.y)))]; }));
-    const par = ids.map(id => { const L = obs.get(id), [i, q] = L[L.length - 1];
-      const c = mtv(Rbc, mtv(Ri[i], mu0.get(id))); if (c[2] <= 1e-6) return 0;
-      const u = cam.project(c); return Math.hypot(u[0] - q.x, u[1] - q.y); });
-    if (median(par) < p.initMinParallax) { this.initWhy = `little sideways motion (${median(par).toFixed(1)} px parallax)`; return 'static'; }
-    const nf = ids.length;
-    const solveLS = (fixG) => { // unknowns: v(3) [, g(3)], lambda(nf)
-      const off = fixG ? 3 : 6, nU = off + nf, H = new Float64Array(nU * nU), b = new Float64Array(nU), row = new Float64Array(nU);
-      ids.forEach((id, j) => {
-        const m0 = mu0.get(id);
-        for (const [i, q] of obs.get(id)) {
-          let mi = mv(Ri[i], mv(Rbc, cam.bearing(q.x, q.y))); mi = scl3(mi, 1 / norm3(mi));
-          const K = skew(mi), Km0 = mv(K, m0), KDp = mv(K, Dp[i]), t = T[i];
-          const Kg = fixG ? mv(K, scl3(fixG, 0.5 * t * t)) : null;
-          for (let r = 0; r < 3; r++) {
-            row.fill(0);
-            for (let c = 0; c < 3; c++) { row[c] = -t * K[3 * r + c]; if (!fixG) row[3 + c] = -0.5 * t * t * K[3 * r + c]; }
-            row[off + j] = Km0[r];
-            const rhs = KDp[r] + (fixG ? Kg[r] : 0);
-            for (let a = 0; a < nU; a++) { if (!row[a]) continue; b[a] += row[a] * rhs; for (let c = 0; c < nU; c++) if (row[c]) H[a * nU + c] += row[a] * row[c]; }
-          }
-        }
-      });
-      for (let a = 0; a < nU; a++) H[a * nU + a] += 1e-9;
-      return cholesky(H, nU) ? cholSolve(H, b, nU) : null;
-    };
-    const x1 = solveLS(null);
-    if (!x1) { this.initWhy = 'alignment solve failed'; return 'fail'; }
-    const g1 = [x1[3], x1[4], x1[5]], gn = norm3(g1);
-    if (Math.abs(gn - GRAV) > p.initGravTol) { this.initWhy = `alignment gravity ${gn.toFixed(2)} m/s² (expected 9.81) — keep moving`; return 'fail'; }
-    const gHat = scl3(g1, 1 / gn), x = solveLS(scl3(gHat, GRAV));
-    if (!x) { this.initWhy = 'alignment solve failed'; return 'fail'; }
-    const lam = ids.map((id, j) => x[3 + j]);
-    if (lam.filter(l => l > p.minDepth && l < p.maxDepth).length < 0.7 * nf) { this.initWhy = 'alignment gave implausible depths — keep moving'; return 'fail'; }
-    // rotate the world so the solved gravity points down (-z)
-    const ax = cross3(gHat, [0, 0, -1]), sn = norm3(ax), cs = -gHat[2];
-    const Rc = sn < 1e-9 ? I3() : expSO3(scl3(ax, Math.atan2(sn, cs) / sn));
-    const R0n = mm(Rc, R0), v0 = mv(Rc, [x[0], x[1], x[2]]);
-    this.alignInfo = { g: +gn.toFixed(3), v0: v0.map(v => +v.toFixed(3)), feats: nf, frames: C.length, parallax: +median(par).toFixed(1) };
-    // keyframes for every collected frame, propagated from the aligned first state
-    const k0 = { id: this.nextKf++, t: t0, R: R0n, p: [0, 0, 0], v: v0, bg, ba: ba.slice(), pre: null, stat: false,
-      priorBg: bg.slice(), priorBa: [0, 0, 0], priorV: v0.slice(), priorVSigma: p.alignInitV, priorBgSigma: p.dynInitBg };
-    this.kfs.push(k0); this.kfById.set(k0.id, k0); this.addObs(k0, C[0].tracks);
-    for (let i = 1; i < C.length; i++) {
-      const last = this.kfs[this.kfs.length - 1], pi = this.integrate(last.t, C[i].t, last.bg, last.ba, true);
-      if (!pi.Linv) return 'fail';
-      const pr = pi.predict(last);
-      const kf = { id: this.nextKf++, t: C[i].t, R: pr.R, p: pr.p, v: pr.v, bg: bg.slice(), ba: ba.slice(), pre: pi, stat: false };
-      this.kfs.push(kf); this.kfById.set(kf.id, kf); this.addObs(kf, C[i].tracks);
-    }
-    ids.forEach((id, j) => {
-      const f = this.feats.get(id), l = lam[j];
-      if (!f || !(l > p.minDepth && l < p.maxDepth) || !f.obs.has(k0.id)) return;
-      const q = f.obs.get(k0.id);
-      f.lm = true; f.tri = true; f.host = k0.id; f.b = cam.bearing(q[0], q[1]); f.rho = 1 / l;
-    });
-    this.status = 'tracking'; this.initMode = 'moving';
-    this.triangulate();
-    const ts = now(); this.optimize(); this.solveMs = now() - ts;
-    this.cleanup(out.kill);
-    const bad = this.checkHealth();
-    if (bad) { this.reset(bad); out.reset = bad; return 'fail'; }
-    this.updateTraj();
-    const lk = this.kfs[this.kfs.length - 1];
-    this.lastKfId = lk.id; this.pose = { t: lk.t, R: lk.R, p: lk.p, v: lk.v };
-    return 'ok';
   }
 
   addKeyframe(t, tracks, stat, out) {
@@ -851,9 +727,7 @@ class Estimator {
     return true;
   }
 
-  makePrior(dp, kfId, rho) {
-    return dp.metric ? { rho, sigma: this.p.depthRel * rho } : { rho, sigma: this.p.depthRel, map: kfId };
-  }
+  makePrior(dp, kfId, rho0) { return { rho: rho0, sigma: this.p.depthRel, map: kfId }; }
   slide() {
     const p = this.p, old = this.kfs.shift();
     const nw = this.kfs[0];
@@ -908,7 +782,7 @@ class Estimator {
           const dp = this.depthPriors.get(kid), r = dp && dp.get(f.id);
           if (!r) continue;
           f.lm = true; f.fromDA3 = true; f.host = kid; f.b = cam.bearing(o[0], o[1]);
-          f.rho = dp.metric ? r : r * Math.exp(this.mapScale.get(kid) || 0); f.prior = this.makePrior(dp, kid, r);
+          f.rho = r * Math.exp(this.mapScale.get(kid) || 0); f.prior = this.makePrior(dp, kid, r);
           break;
         }
       }
@@ -972,7 +846,14 @@ class Estimator {
       }
     });
 
-    mapIds.forEach((id, k) => F.push({ s: [], d: [0, 0], l: -1, x: [k], rob: false, fn: (st, r, xv) => [xv[0] / p.da3ScaleSigma] }));
+    { // scale of each DA3 map: soft tie to the previous map, very weak absolute anchor
+      const order = mapIds.map((id, k) => [this.kfById.get(id).t, k]).sort((a, b) => a[0] - b[0]).map(e => e[1]);
+      order.forEach((k, i) => {
+        const s0 = this.mapScale.get(mapIds[k]) || 0;
+        F.push({ s: [], d: [0, 0], l: -1, x: [k], rob: false, fn: (st, r, xv) => [(xv[0] - s0) / p.da3ScaleSigma] });
+        if (i > 0) { const kp = order[i - 1]; F.push({ s: [], d: [0, 0], l: -1, x: [kp, k], rob: false, fn: (st, r, xv) => [(xv[1] - xv[0]) / p.da3ScaleCons] }); }
+      });
+    }
     const hub = p.huber;
     const fcost = (r, rob) => {
       let s = 0; for (let i = 0; i < r.length; i++) s += r[i] * r[i];
@@ -1156,14 +1037,15 @@ class Estimator {
     return out;
   }
 
-  // DA3 depth prior. data = model output on a dw x dh grid.
-  // opt.map(u, v) -> depth-grid pixel for a processing-image pixel (crop/resize aware).
-  // opt.metric: data is metric depth -> absolute priors (scale observable from vision);
-  // opt.monitorOnly (metric): only measure the VIO/DA3 scale ratio, add no priors.
-  // otherwise it is depth or inverse depth of unknown scale, median-aligned to landmarks.
+  // DA3 depth map for keyframe kfId on a dw x dh grid; opt.map(u, v) -> grid pixel.
+  // The raw output is stored as inverse depth rho0 with ONE free log-scale per map, solved in
+  // the window: landmark rho = rho0 * exp(s_k). DA3 thus fixes depth ratios inside a frame,
+  // while the metric scale comes from the IMU. Consecutive maps' scales are tied softly.
   addDepthMap(kfId, data, dw, dh, opt = {}) {
     const kf = this.kfById.get(kfId), cam = this.cam, p = this.p;
     if (!kf || !cam) return null;
+    const D = this.da3;
+    if (D.inv == null) D.inv = !!p.da3Inverse;
     const map = opt.map || ((u, v) => [u * dw / cam.W - 0.5, v * dh / cam.H - 0.5]);
     const sample = (u, v) => {
       const q = map(u, v), x = q[0], y = q[1];
@@ -1171,7 +1053,7 @@ class Estimator {
       const x0 = x | 0, y0 = y | 0, ax = x - x0, ay = y - y0, i = y0 * dw + x0;
       return (data[i] * (1 - ax) + data[i + 1] * ax) * (1 - ay) + (data[i + dw] * (1 - ax) + data[i + dw + 1] * ax) * ay;
     };
-    const pairs = [], all = [];
+    const all = [], pairs = [];
     for (const f of this.feats.values()) {
       const o = f.obs.get(kfId); if (!o) continue;
       const d = sample(o[0], o[1]); if (!(d > 1e-6)) continue;
@@ -1181,41 +1063,37 @@ class Estimator {
         if (Z > p.minDepth) pairs.push([d, Z]);
       }
     }
-    const D = this.da3;
-    let toZ, scale, err = NaN, inv = false;
-    if (opt.metric) {
-      toZ = d => d; scale = 1;
-      if (pairs.length >= 3) {
-        D.vioRatio = median(pairs.map(([d, Z]) => Z / d));
-        D.ratios.push(D.vioRatio); if (D.ratios.length > 100) D.ratios.shift();
-        err = median(pairs.map(([d, Z]) => Math.abs(d - Z) / Z));
-      }
-      Object.assign(D, { maps: D.maps + 1, mode: 'metric', scale: 1, err, n: pairs.length });
-      if (pairs.length >= 8 && err > 0.6) return { ok: false, err };
-      if (opt.monitorOnly) return { ok: true, scale, err, mode: 'metric (monitor)', n: pairs.length, vioRatio: D.vioRatio };
-    } else {
-      if (pairs.length < 8) return { ok: false, n: pairs.length };
-      // depth or inverse depth? correlation sign of log(d) vs log(Z), accumulated over maps
+    if (all.length < 8) return { ok: false, n: all.length };
+    if (pairs.length >= 8) { // output really depth, or inverse depth? (sign of log-correlation)
       const ld = pairs.map(q => Math.log(q[0])), lz = pairs.map(q => Math.log(q[1]));
       const md = ld.reduce((a, b) => a + b) / ld.length, mz = lz.reduce((a, b) => a + b) / lz.length;
       let cov = 0; for (let i = 0; i < ld.length; i++) cov += (ld[i] - md) * (lz[i] - mz);
-      D.vote += Math.sign(cov);
-      inv = D.vote < 0;
-      scale = median(pairs.map(([d, Z]) => inv ? Z * d : Z / d));
-      toZ = d => inv ? scale / d : scale * d;
-      err = median(pairs.map(([d, Z]) => Math.abs(toZ(d) - Z) / Z));
-      Object.assign(D, { maps: D.maps + 1, mode: inv ? 'inverse depth' : 'depth', scale, err, n: pairs.length });
-      if (err > 0.5) return { ok: false, err };
+      D.vote += Math.sign(cov) * (D.inv ? -1 : 1);
+      if (D.vote <= -3) { // wrong assumption: flip and drop the priors built on it
+        D.inv = !D.inv; D.vote = 0; this.depthPriors.clear(); this.mapScale.clear();
+        for (const f of this.feats.values()) f.prior = null;
+      }
+    }
+    const rho0 = d => D.inv ? d : 1 / d;
+    // initial scale of this map: from triangulated landmarks if any, else the newest map, else a nominal depth
+    let s0;
+    if (pairs.length >= 5) s0 = Math.log(median(pairs.map(([d, Z]) => (1 / Z) / rho0(d))));
+    else {
+      let newest = null; for (const [id] of this.depthPriors) if (this.kfById.has(id) && (newest == null || this.kfById.get(id).t > this.kfById.get(newest).t)) newest = id;
+      s0 = newest != null ? this.mapScale.get(newest) || 0 : Math.log((1 / p.da3InitDepth) / median(all.map(([, d]) => rho0(d))));
     }
     const m = new Map();
-    for (const [f, d] of all) {
-      const Z = toZ(d); if (!(Z > p.minDepth && Z < p.maxDepth)) continue;
-      m.set(f.id, 1 / Z);
-    }
-    m.metric = !!opt.metric;
-    for (const [f] of all) if (f.lm && f.host === kfId && m.has(f.id)) f.prior = this.makePrior(m, kfId, m.get(f.id));
-    this.depthPriors.set(kfId, m); this.mapScale.set(kfId, 0);
-    return { ok: true, scale, err, mode: D.mode, n: pairs.length, vioRatio: D.vioRatio };
+    for (const [f, d] of all) m.set(f.id, rho0(d));
+    this.depthPriors.set(kfId, m); this.mapScale.set(kfId, s0);
+    for (const [f] of all) if (f.lm && f.host === kfId) f.prior = this.makePrior(m, kfId, m.get(f.id));
+    const err = pairs.length >= 3 ? median(pairs.map(([d, Z]) => Math.abs(1 / (rho0(d) * Math.exp(s0)) - Z) / Z)) : NaN;
+    Object.assign(D, { maps: D.maps + 1, mode: D.inv ? 'inverse depth' : 'depth', scale: Math.exp(-s0), err, n: all.length, nTri: pairs.length });
+    return { ok: true, n: all.length, nTri: pairs.length, err, scale: Math.exp(-s0) };
+  }
+  // metres per unit of raw DA3 depth for the newest map (as solved by the window)
+  da3Scale() {
+    let newest = null; for (const [id] of this.mapScale) if (this.kfById.has(id) && (newest == null || this.kfById.get(id).t > this.kfById.get(newest).t)) newest = id;
+    return newest == null ? NaN : Math.exp(-this.mapScale.get(newest));
   }
 }
 
@@ -1471,8 +1349,9 @@ const SCHEMA = [
   ['staticGyro', 'Static: gyro deviation (rad/s)', 'Keyframes', D.staticGyro, 0.005, 'est'],
   ['staticAcc', 'Static: accel-norm std (m/s²)', 'Keyframes', D.staticAcc, 0.01, 'est'],
   ['staticPx', 'Static: pixel motion (px)', 'Keyframes', D.staticPx, 0.1, 'est'],
-  ['initRest', 'Init: rest duration (s)', 'Initialization', D.initRest, 0.1, 'est'],
-  ['initTracks', 'Init: min tracked features', 'Initialization', D.initTracks, 1, 'est'],
+  ['initTracks', 'Start: min tracked features for keyframe 0', 'Start', D.initTracks, 1, 'est'],
+  ['initV', 'Start: velocity prior σ (m/s)', 'Start', D.initV, 0.1, 'est'],
+  ['initBgSigma', 'Start: gyro bias prior σ (rad/s)', 'Start', D.initBgSigma, 0.005, 'est'],
   ['window', 'Sliding window size (keyframes)', 'Back end', D.window, 1, 'est'],
   ['lmIters', 'Levenberg-Marquardt iterations', 'Back end', D.lmIters, 1, 'est'],
   ['sigmaPx', 'Reprojection σ (px)', 'Back end', D.sigmaPx, 0.1, 'est'],
@@ -1500,7 +1379,8 @@ const SCHEMA = [
   ['da3Backend', 'DA3 backend: auto | webgpu | wasm', 'Depth prior', 'auto', 0, 'app'],
   ['da3Size', 'DA3 input size (px, multiple of 14)', 'Depth prior', 504, 14, 'app'],
   ['da3Fit', 'DA3 input fit: square (centre crop) | aspect', 'Depth prior', 'square', 0, 'app'],
-  ['da3Mode', 'DA3 use: relative | metric-monitor (ratio only) | metric (priors set scale)', 'Depth prior', 'relative', 0, 'app'],
+  ['da3Inverse', 'DA3 output is inverse depth (0 = depth; auto-corrected)', 'Depth prior', 0, 1, 'est'],
+  ['da3ScaleCons', 'DA3 map-to-map scale tie (log σ)', 'Depth prior', D.da3ScaleCons, 0.01, 'est'],
   ['da3Budget', 'Benchmark: max ms per DA3 run to auto-select', 'Depth prior', 500, 50, 'app'],
 ];
 const DEF = Object.fromEntries(SCHEMA.map(s => [s[0], s[3]]));
@@ -2014,7 +1894,6 @@ async function inferDepth(src, o = {}) {
   let data = t.data;
   data = data instanceof Float32Array ? data : (t.type === 'float16' && data instanceof Uint16Array) ? halfToFloat(data) : Float32Array.from(data);
   if (data.length !== dw * dh) data = data.subarray(0, dw * dh);
-  if (SET.da3Mode.startsWith('metric')) { const fm = 0.5 * (K[0] + K[4]) / 300; data = Float32Array.from(data, v => v * fm); }
   let finite = 0; for (let i = 0; i < data.length; i += 7) if (Number.isFinite(data[i])) finite++;
   if (!finite) throw new Error('depth output is all NaN/Inf (try da3File onnx/model.onnx)');
   const map = (u, v) => [((u * ks - g.ox) * g.sx + 0.5) * dw / g.W - 0.5, ((v * ks - g.oy) * g.sy + 0.5) * dh / g.H - 0.5];
@@ -2046,14 +1925,9 @@ async function runDA3(kfId, src) {
     pushHist(S.hist.da3, r.ms);
     if (kfId == null) st.status = S.scanning ? `running ${r.inW}×${r.inH} · scan starting` : `ready ${r.inW}×${r.inH} · tap Start scan`;
     else {
-      const metric = SET.da3Mode.startsWith('metric');
-      const res = S.est.addDepthMap(kfId, r.data, r.dw, r.dh, { map: r.map, metric, monitorOnly: SET.da3Mode === 'metric-monitor' }), da = S.est.da3;
-      if (res && res.ok) {
-        st.aligned = (st.aligned || 0) + 1;
-        st.status = metric ? `${SET.da3Mode} · VIO÷DA3 scale ${Number.isFinite(da.vioRatio) ? da.vioRatio.toFixed(3) : '–'} · ${res.n} pts · err ${Number.isFinite(da.err) ? (100 * da.err).toFixed(0) + '%' : '–'}`
-          : `aligned: ${da.mode} · s=${da.scale.toPrecision(3)} · err ${(100 * da.err).toFixed(0)}%`;
-      } else st.status = !res ? 'keyframe left window before depth arrived'
-        : res.n != null ? `aligning: ${res.n}/8 triangulated landmarks in view — move sideways` : `rejected map: err ${(100 * (res.err || 0)).toFixed(0)}%`;
+      const res = S.est.addDepthMap(kfId, r.data, r.dw, r.dh, { map: r.map }), da = S.est.da3;
+      if (res && res.ok) { st.aligned = (st.aligned || 0) + 1; st.status = `map ${res.n} pts (${res.nTri} triangulated) · ${da.mode} · ${Number.isFinite(S.est.da3Scale()) ? S.est.da3Scale().toPrecision(3) + ' m/unit' : ''}${Number.isFinite(res.err) ? ' · err ' + (100 * res.err).toFixed(0) + '%' : ''}`; }
+      else st.status = !res ? 'keyframe left the window before its depth arrived' : `only ${res.n} features on this keyframe`;
     }
   } catch (e) { console.error('DA3 run failed', e); st.status = 'run error: ' + (e.message || e); }
   finally { if (src instanceof HTMLCanvasElement) releaseHi(src); }
@@ -2130,7 +2004,7 @@ async function imuRestCheck(sec) {
 // ------------------------------------------------------------------ walk scale test
 const LS_WALK = 'pocketvio.walks.v1';
 S.walks = lsGet(LS_WALK) || [];
-const da3Desc = () => S.da3.on && S.da3.ready ? `DA3 ${SET.da3Mode} ${SET.da3Size} ${SET.da3Fit}` : 'VIO only';
+const da3Desc = () => `DA3 ${SET.da3Size} ${SET.da3Fit}`;
 $('wStart').addEventListener('click', () => {
   const est = S.est;
   if (est.status !== 'tracking' || !est.pose) { setHint('Walk test needs tracking: start and initialize first.', 'warn'); return; }
@@ -2167,7 +2041,7 @@ renderWalks();
 // ------------------------------------------------------------------ report
 function buildReport() {
   return JSON.stringify({ app: 'pocket-vio', date: new Date().toISOString(), ua: navigator.userAgent, setup: SETUP, calib: { fov: SET.fov, td: SET.td, offset: SET.camOffset, last: S.lastCalib },
-    imu: S.imuCheck || null, bench: S.bench || null, da3: { status: S.da3.status, mode: SET.da3Mode, size: SET.da3Size, fit: SET.da3Fit, vioRatio: S.est.da3.vioRatio, log: da3Log.slice(-30) },
+    imu: S.imuCheck || null, bench: S.bench || null, da3: { status: S.da3.status, size: SET.da3Size, fit: SET.da3Fit, output: S.est.da3.mode, mPerUnit: S.est.da3Scale(), log: da3Log.slice(-30) },
     live: { fps: S.fps, imuRate: S.imuRate, solveMs: VIO.median(S.hist.solve), kltMs: VIO.median(S.hist.klt), da3Ms: VIO.median(S.hist.da3) }, walks: S.walks, settings: SET }, null, 1);
 }
 async function copyReport() {
@@ -2397,7 +2271,7 @@ const RO = [
   ['FOV / td / offset', () => `${f2(SET.fov, 1)}° / ${SET.td} ms / ${SET.camOffset}°`],
   ['DA3', () => S.da3.status + (S.da3.ms ? ` · ${f2(S.da3.ms, 0)}ms` : ''), true],
   ['DA3 in solver', () => { const n = S.est.da3Stats(); return `${n.withPrior} landmarks with prior · ${n.fromDA3} initialized by DA3 · ${S.da3.aligned || 0}/${S.da3.runs || 0} maps aligned`; }, true],
-  ['scale VIO÷DA3 (metric)', () => SET.da3Mode.startsWith('metric') && Number.isFinite(S.est.da3.vioRatio) ? `${S.est.da3.vioRatio.toFixed(3)} (median of ${S.est.da3.ratios.length}: ${VIO.median(S.est.da3.ratios).toFixed(3)})` : '–'],
+  ['DA3 scale (solved)', () => Number.isFinite(S.est.da3Scale()) ? `${S.est.da3Scale().toPrecision(3)} m per unit · ${S.est.da3.mode}` : '–'],
   ['median timing', () => `solve ${f2(VIO.median(S.hist.solve), 0)} · klt ${f2(VIO.median(S.hist.klt), 0)} · DA3 ${f2(VIO.median(S.hist.da3), 0)} ms`, true],
   ['last reset', () => S.lastReset || '–'],
 ];
@@ -2417,11 +2291,10 @@ function updateReadouts() {
   const chip = $('chip'); chip.className = 'chip ' + st; chip.textContent = st;
   if (S.mode === 'running' && S.est.status === 'warmup' && !hintSticky()) {
     const n = S.lastTracks.length, need = S.est.p.initTracks;
-    const sec = S.est.warmStart != null && S.prevT != null ? Math.max(0, S.prevT + S.est.p.td - S.est.warmStart) : 0;
-    setHint(n < need ? `Starting… point the camera at something textured (${n}/${need} features).` : `Starting (${sec.toFixed(1)} s) — ${S.est.initWhy || 'measuring'}. Keep moving normally.`, n < need ? 'warn' : '', true);
+    setHint(`Starting — ${S.est.initWhy || 'first keyframe'}.`, n < need ? 'warn' : '', true);
   } else if (S.mode === 'running' && S.est.status === 'tracking' && !hintSticky()) {
     const n = S.lastTracks.length;
-    setHint(n < 40 ? 'Few features — point at a more textured area.' : `Scanning (started ${S.est.initMode === 'rest' ? 'at rest' : 'while moving'}) · ${S.est.pathLength().toFixed(1)} m so far.`, n < 40 ? 'warn' : '', true);
+    setHint(n < 40 ? 'Few features — point at a more textured area.' : `Scanning · ${S.est.pathLength().toFixed(1)} m so far.`, n < 40 ? 'warn' : '', true);
   } else if (S.mode === 'calibrating') {
     setHint(`Calibrating: rotate the phone in place — ${Math.max(0, 5 - (performance.now() - S.calib.start) / 1000).toFixed(1)} s left · ${S.calib.pairs.length} frame pairs`, '', true);
   }
@@ -2457,7 +2330,7 @@ function applySetting(sc) {
   else if (to === 'trk') { Object.assign(S.trk.p, trkParams()); if (k === 'levels' || k === 'win') S.trk.reset(); }
   else if (to === 'cam') { if (k === 'procSize') S.proc = null; else updateCamera(); if (S.mode === 'running') reinit('camera setting changed'); }
   else if (k === 'imuFreq' && S.mode !== 'idle') { stopSensors(); startSensors(); }
-  else if (k.startsWith('da3') && !['da3Size', 'da3Fit', 'da3Mode', 'da3Budget'].includes(k)) { S.da3.ready = false; S.da3.eng = null; if (S.da3.on && !S.da3.loading) loadDA3(); }
+  else if (k.startsWith('da3') && !['da3Size', 'da3Fit', 'da3Budget'].includes(k)) { S.da3.ready = false; S.da3.eng = null; if (S.da3.on && !S.da3.loading) loadDA3(); }
 }
 $('sDefaults').addEventListener('click', () => {
   for (const s of SCHEMA) SET[s[0]] = s[3];
