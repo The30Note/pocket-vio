@@ -82,12 +82,13 @@ function inv3(A) {
 }
 
 // ------------------------------------------------------------ VIO test
-function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, label = 'VIO', scanAt = 0, initBgErr = null } = {}) {
+function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, label = 'VIO', scanAt = 0, initBgErr = null, params = {} } = {}) {
   const R = rng(seed), tStatic = 2.0, mo = makeMotion(tStatic);
   const W = 270, H = 360, cam = makeCam(W, H, 65, 0);
   const bgT = [0.012, -0.018, 0.009], baT = [0.06, -0.08, 0.1];
   const est = new VIO.Estimator({ td });
   est.setCamera(cam);
+  Object.assign(est.p, params);
   if (initBgErr) est.p.initBg = add3(bgT, initBgErr); // gyro bias from an earlier rest check, slightly stale
   let scanning = false;
   // landmarks on the walls of a room
@@ -230,6 +231,7 @@ if (run('td')) testVIO({ seconds: 20, seed: 2, td: 0.025, label: 'VIO (td=25ms)'
 if (run('da3')) testVIO({ seconds: 20, seed: 4, da3: true, label: 'VIO + DA3 prior' });
 if (run('moving')) testVIO({ seconds: 30, seed: 5, scanAt: 8, initBgErr: [0.003, -0.002, 0.002], label: 'VIO started while moving' });
 if (run('moving7')) testVIO({ seconds: 25, seed: 7, scanAt: 6, initBgErr: [0.002, 0.002, -0.003], label: 'seed7 no DA3' });
+if (run('fallback')) testVIO({ seconds: 25, seed: 9, scanAt: 7.5, da3: true, initBgErr: [0.002, -0.003, 0.002], params: { initGravTol: 0 }, label: 'alignment always fails -> timeout start' });
 if (run('movingda3')) testVIO({ seconds: 25, seed: 7, scanAt: 6, da3: true, initBgErr: [0.002, 0.002, -0.003], label: 'VIO + DA3 started while moving' });
 if (run('moving2')) testVIO({ seconds: 30, seed: 6, scanAt: 13.5, initBgErr: [-0.002, 0.003, 0.001], label: 'VIO started while moving (2)' });
 if (run('metric')) testVIO({ seconds: 20, seed: 4, da3: 'metric', label: 'VIO + DA3 metric' });

@@ -556,7 +556,7 @@ const DEFAULTS = {
   depthRel: 0.3, td: 0, maxMapPts: 40000,
   da3ScaleSigma: 0.5,
   dynamicInit: 1, dynInitV: 0.3, dynInitBg: 0.02, initBg: null,
-  initFrameDt: 0.15, initSpan: 1.0, initMinParallax: 6, initGravTol: 1.5, alignInitV: 0.5,
+  initFrameDt: 0.15, initSpan: 1.0, initMinParallax: 6, initGravTol: 1.5, alignInitV: 0.5, initTimeout: 3.0,
 };
 
 class Estimator {
@@ -571,7 +571,7 @@ class Estimator {
   startScan() { this.scanning = true; this.reset('scan start'); }
   stopScan() { this.scanning = false; this.status = 'idle'; }
   reset(reason) {
-    this.status = this.scanning ? 'warmup' : 'idle'; this.resetReason = reason || ''; this.warmStart = null; this.initMode = ''; this.initFrames = null; this.alignInfo = null; this.warmHist = null;
+    this.status = this.scanning ? 'warmup' : 'idle'; this.resetReason = reason || ''; this.warmStart = null; this.initMode = ''; this.initFrames = null; this.alignInfo = null; this.warmHist = null; this.initWhy = '';
     this.kfs = []; this.kfById = new Map(); this.feats = new Map();
     this.depthPriors = new Map(); this.mapScale = new Map(); this.da3 = { maps: 0, mode: '', scale: 0, err: 0, vote: 0, n: 0, vioRatio: NaN, ratios: [] };
     this.traj = []; this.trajById = new Map(); this.mapPts = [];
@@ -645,21 +645,23 @@ class Estimator {
         still = d.length >= 10 && median(d) < 2 * p.staticPx;
       }
       if (rest) rest.visualStill = still;
-      if (tracks.length < p.initTracks) return out;
+      if (tracks.length < p.initTracks) { this.initWhy = `only ${tracks.length}/${p.initTracks} features — point at texture`; return out; }
       if (rest && rest.ok && still) { this.initialize(t, tracks, rest, false); out.kf = true; }
       else if (p.dynamicInit) {
         // moving start: collect ~1 s of frames, then solve velocity/gravity/depths jointly
         const C = this.initFrames || (this.initFrames = []);
         if (!C.length || t - C[C.length - 1].t >= p.initFrameDt) C.push({ t, tracks: tracks.map(q => ({ id: q.id, x: q.x, y: q.y })) });
         while (C.length > 1 && t - C[0].t > p.initSpan + 0.6) C.shift();
-        if (C.length >= 5 && C[C.length - 1].t - C[0].t >= p.initSpan) {
+        if (C.length < 5 || C[C.length - 1].t - C[0].t < p.initSpan) this.initWhy = `collecting frames (${C.length})`;
+        else {
           const r = this.alignInit(C, out);
           if (r === 'ok') { this.initFrames = null; out.kf = true; return out; }
-          if (r === 'static' && t - this.warmStart >= p.initSpan + 1.0) {
+          // never wait forever: after initTimeout start anyway (velocity ~0, loose prior)
+          if ((r === 'static' && t - this.warmStart >= p.initSpan + 1.0) || (this.status === 'warmup' && t - this.warmStart >= p.initTimeout)) {
             // hand-held but not translating: velocity ~ 0, gravity from the mean accel
             const S = this.imu.range(t - 0.5, t); let am = [0, 0, 0]; for (const s of S) am = add3(am, s.a);
             this.initFrames = null;
-            this.initialize(t, tracks, { aMean: scl3(am, 1 / S.length), wMean: p.initBg || [0, 0, 0] }, true); out.kf = true; return out;
+            this.initialize(t, tracks, { aMean: scl3(am, 1 / S.length), wMean: p.initBg || [0, 0, 0] }, true); this.initMode = r === 'static' ? 'moving (no translation)' : 'fallback (alignment timed out)'; out.kf = true; return out;
           }
           if (r === 'fail' && this.status === 'warmup') C.shift();
         }
@@ -714,7 +716,7 @@ class Estimator {
   alignInit(C, out) {
     const p = this.p, cam = this.cam, Rbc = cam.Rbc, bg = (p.initBg || [0, 0, 0]).slice(), ba = [0, 0, 0];
     const t0 = C[0].t, A = this.imu.range(t0 - 0.25, t0 + 0.25);
-    if (A.length < 10) return 'fail';
+    if (A.length < 10) { this.initWhy = 'not enough IMU samples'; return 'fail'; }
     let am = [0, 0, 0]; for (const s of A) am = add3(am, s.a); am = scl3(am, 1 / A.length);
     const R0 = mm(Ry(Math.atan2(-am[0], Math.hypot(am[1], am[2]))), Rx(Math.atan2(am[1], am[2])));
     const pre = C.map(c => this.integrate(t0, c.t, bg, ba, false));
@@ -722,13 +724,13 @@ class Estimator {
     const f0 = new Map(C[0].tracks.map(q => [q.id, q])), obs = new Map();
     for (let i = 1; i < C.length; i++) for (const q of C[i].tracks) if (f0.has(q.id)) { if (!obs.has(q.id)) obs.set(q.id, []); obs.get(q.id).push([i, q]); }
     const ids = [...obs.keys()].filter(id => obs.get(id).length >= 2);
-    if (ids.length < 15) return 'fail';
+    if (ids.length < 15) { this.initWhy = `only ${ids.length} features stayed tracked for 1 s — slow down, point at texture`; return 'fail'; }
     // translation-induced (rotation-compensated) parallax decides whether alignment is observable
     const mu0 = new Map(ids.map(id => { const q = f0.get(id); return [id, mv(R0, mv(Rbc, cam.bearing(q.x, q.y)))]; }));
     const par = ids.map(id => { const L = obs.get(id), [i, q] = L[L.length - 1];
       const c = mtv(Rbc, mtv(Ri[i], mu0.get(id))); if (c[2] <= 1e-6) return 0;
       const u = cam.project(c); return Math.hypot(u[0] - q.x, u[1] - q.y); });
-    if (median(par) < p.initMinParallax) return 'static';
+    if (median(par) < p.initMinParallax) { this.initWhy = `little sideways motion (${median(par).toFixed(1)} px parallax)`; return 'static'; }
     const nf = ids.length;
     const solveLS = (fixG) => { // unknowns: v(3) [, g(3)], lambda(nf)
       const off = fixG ? 3 : 6, nU = off + nf, H = new Float64Array(nU * nU), b = new Float64Array(nU), row = new Float64Array(nU);
@@ -751,13 +753,13 @@ class Estimator {
       return cholesky(H, nU) ? cholSolve(H, b, nU) : null;
     };
     const x1 = solveLS(null);
-    if (!x1) return 'fail';
+    if (!x1) { this.initWhy = 'alignment solve failed'; return 'fail'; }
     const g1 = [x1[3], x1[4], x1[5]], gn = norm3(g1);
-    if (Math.abs(gn - GRAV) > p.initGravTol) return 'fail';
+    if (Math.abs(gn - GRAV) > p.initGravTol) { this.initWhy = `alignment gravity ${gn.toFixed(2)} m/s² (expected 9.81) — keep moving`; return 'fail'; }
     const gHat = scl3(g1, 1 / gn), x = solveLS(scl3(gHat, GRAV));
-    if (!x) return 'fail';
+    if (!x) { this.initWhy = 'alignment solve failed'; return 'fail'; }
     const lam = ids.map((id, j) => x[3 + j]);
-    if (lam.filter(l => l > p.minDepth && l < p.maxDepth).length < 0.7 * nf) return 'fail';
+    if (lam.filter(l => l > p.minDepth && l < p.maxDepth).length < 0.7 * nf) { this.initWhy = 'alignment gave implausible depths — keep moving'; return 'fail'; }
     // rotate the world so the solved gravity points down (-z)
     const ax = cross3(gHat, [0, 0, -1]), sn = norm3(ax), cs = -gHat[2];
     const Rc = sn < 1e-9 ? I3() : expSO3(scl3(ax, Math.atan2(sn, cs) / sn));
@@ -2042,7 +2044,7 @@ async function runDA3(kfId, src) {
     const kf = kfId != null ? S.est.kfById.get(kfId) : null;
     const r = await inferDepth(src, { kf });
     pushHist(S.hist.da3, r.ms);
-    if (kfId == null) st.status = `running ${r.inW}×${r.inH} · waiting for tracking`;
+    if (kfId == null) st.status = S.scanning ? `running ${r.inW}×${r.inH} · scan starting` : `ready ${r.inW}×${r.inH} · tap Start scan`;
     else {
       const metric = SET.da3Mode.startsWith('metric');
       const res = S.est.addDepthMap(kfId, r.data, r.dw, r.dh, { map: r.map, metric, monitorOnly: SET.da3Mode === 'metric-monitor' }), da = S.est.da3;
@@ -2415,7 +2417,8 @@ function updateReadouts() {
   const chip = $('chip'); chip.className = 'chip ' + st; chip.textContent = st;
   if (S.mode === 'running' && S.est.status === 'warmup' && !hintSticky()) {
     const n = S.lastTracks.length, need = S.est.p.initTracks;
-    setHint(n < need ? `Starting… point the camera at something textured (${n}/${need} features).` : 'Starting…', n < need ? 'warn' : '', true);
+    const sec = S.est.warmStart != null && S.prevT != null ? Math.max(0, S.prevT + S.est.p.td - S.est.warmStart) : 0;
+    setHint(n < need ? `Starting… point the camera at something textured (${n}/${need} features).` : `Starting (${sec.toFixed(1)} s) — ${S.est.initWhy || 'measuring'}. Keep moving normally.`, n < need ? 'warn' : '', true);
   } else if (S.mode === 'running' && S.est.status === 'tracking' && !hintSticky()) {
     const n = S.lastTracks.length;
     setHint(n < 40 ? 'Few features — point at a more textured area.' : `Scanning (started ${S.est.initMode === 'rest' ? 'at rest' : 'while moving'}) · ${S.est.pathLength().toFixed(1)} m so far.`, n < 40 ? 'warn' : '', true);
