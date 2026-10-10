@@ -44,6 +44,8 @@ header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: c
   max-width: 760px; margin: 0 auto; padding: 12px 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; letter-spacing: -.01em; }
 .brand small { font-weight: 500; color: var(--muted); font-size: 12px; }
+.brand { white-space: nowrap; } header.top .row { flex-wrap: nowrap; }
+@media (max-width: 480px) { .brand small { display: none; } }
 .logo { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); position: relative; }
 .logo::after { content: ""; position: absolute; inset: 6px; border: 2px solid var(--accent-ink); border-radius: 50%; }
 .chip { font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .06em; padding: 7px 10px; border-radius: 999px;
@@ -100,6 +102,27 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
 .srow.wide { grid-template-columns: 1fr; }
 .diag { font: 12px/1.5 var(--mono); color: var(--muted); word-break: break-word; white-space: pre-wrap; }
 .diag:empty { display: none; }
+button.small { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radius: 9px; }
+.setup { padding: 14px; border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.setup-head, .sh { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.setup h2 { margin: 0; font-size: 17px; }
+.steps { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 10px; }
+.steps li { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--surface-2); }
+.steps p { margin: 6px 0 8px; color: var(--muted); font-size: 13px; }
+.steps .row button { flex: 1; }
+.res { font: 12px/1.45 var(--mono); margin-top: 6px; word-break: break-word; }
+.res:empty { display: none; }
+.stchip { font: 600 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; padding: 5px 8px; border-radius: 999px; background: var(--surface); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+.stchip.ok { color: var(--ok); } .stchip.fail { color: var(--bad); } .stchip.running { color: var(--accent); } .stchip.skip { color: var(--warn); }
+.setup-foot { margin-top: 12px; } .setup-foot button { flex: 1; }
+.tbl { width: 100%; border-collapse: collapse; font: 12px/1.4 var(--mono); margin-top: 8px; }
+.tbl th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px; } .tbl td { padding: 4px; border-top: 1px solid var(--border); }
+.tbl tr.sel td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.tbl button { min-height: 28px; padding: 4px 8px; font-size: 12px; }
+.tbl td.muted { color: var(--muted); font-family: Inter, sans-serif; }
+.walk { padding: 12px 14px; display: grid; gap: 8px; }
+.walk .row button { flex: 1; }
+.walk input, .walk select { flex: 1; min-width: 0; font: 14px var(--mono); padding: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
 .da3log { display: none; margin: 0; padding: 0 14px 12px; font-size: 11px; max-height: 40vh; overflow: auto; }
 .foot { color: var(--muted); font-size: 12px; }
 @media (max-width: 420px) { .controls button { font-size: 13px; padding: 10px 2px; } }
@@ -108,9 +131,33 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
 <body>
 <header class="top">
   <div class="brand"><span class="logo" aria-hidden="true"></span>Pocket VIO <small>monocular VIO</small></div>
-  <span id="chip" class="chip idle">idle</span>
+  <div class="row"><button id="bSetup" class="small">Setup</button><span id="chip" class="chip idle">idle</span></div>
 </header>
 <main>
+  <section class="card setup" id="setup" hidden>
+    <div class="setup-head"><h2>First-time setup</h2><button id="setupClose" class="small">Close</button></div>
+    <ol class="steps">
+      <li><div class="sh"><b>1 · Camera &amp; motion sensors</b><span class="stchip" id="st_sensors"></span></div>
+        <p>Grants camera access and starts the gyroscope and accelerometer.</p>
+        <div class="row"><button id="ss_sensors" class="primary">Grant &amp; test</button></div><div class="res" id="res_sensors"></div></li>
+      <li><div class="sh"><b>2 · Install Depth Anything 3</b><span class="stchip" id="st_da3"></span></div>
+        <p>Downloads the ONNX model once (cached on this phone), builds the WebGPU session and checks its inputs. Then benchmarks it.</p>
+        <div class="row"><button id="ss_da3" class="primary">Install</button><button id="ss_da3skip">Skip</button></div><div class="res" id="res_da3"></div></li>
+      <li><div class="sh"><b>3 · Benchmark DA3</b><span class="stchip" id="st_bench"></span></div>
+        <p>Times the model at 280 → 504 px. The fastest size within the budget is selected; tap <i>Use</i> to override.</p>
+        <div class="row"><button id="ss_bench">Run benchmark</button></div><table class="tbl" id="benchTable"></table><div class="res" id="res_bench"></div></li>
+      <li><div class="sh"><b>4 · Camera calibration</b><span class="stchip" id="st_calib"></span></div>
+        <p>Point at a textured scene, tap Calibrate, then rotate the phone in place (twist and tilt, don't walk) for 5 s. Solves FOV, camera↔IMU time offset and camera rotation.</p>
+        <div class="row"><button id="ss_calib" class="primary">Calibrate</button></div><div class="res" id="res_calib"></div></li>
+      <li><div class="sh"><b>5 · IMU rest check</b><span class="stchip" id="st_imu"></span></div>
+        <p>Lay the phone flat on a table, tap Measure and don't touch it for 3 s. Measures gyro bias and sensor noise.</p>
+        <div class="row"><button id="ss_imu">Measure</button><button id="ss_imuApply" hidden>Apply suggested noise</button></div><div class="res" id="res_imu"></div></li>
+      <li><div class="sh"><b>6 · Scale test</b><span class="stchip" id="st_scale"></span></div>
+        <p>Scale of the walked path is the goal: walk a measured straight line (tape, floor tiles, ≥ 5 m) with the Walk scale test card and enter its true length. Results are kept per mode (VIO only / DA3 relative / DA3 metric).</p>
+        <div class="row"><button id="ss_scale">Show walk test</button></div><div class="res" id="res_scale"></div></li>
+    </ol>
+    <div class="row setup-foot"><button id="setupCopy">Copy report</button><button id="setupFinish" class="primary">Finish</button></div>
+  </section>
   <section class="card cam">
     <canvas id="view" width="270" height="360"></canvas>
     <div class="empty" id="camEmpty">Back camera preview appears here</div>
@@ -131,6 +178,14 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
     <button id="ePly">Map points (PLY)</button>
   </div>
   <div class="card"><label class="toggle"><input type="checkbox" id="da3"> <span style="white-space:nowrap">DA3 depth prior</span> <span class="sub" id="da3Status">off</span></label><pre class="diag da3log" id="da3Log"></pre></div>
+  <section class="card walk" id="walkCard">
+    <div class="sh"><b>Walk scale test</b><button id="wClear" class="small">Clear</button></div>
+    <div class="row"><button id="wStart" class="primary">Mark start</button><button id="wEnd" disabled>Mark end</button></div>
+    <div class="diag" id="walkLive"></div>
+    <div class="row" id="walkSave" hidden><input id="wTruth" type="number" inputmode="decimal" step="0.01" placeholder="true distance (m)"><select id="wKind"><option value="straight">straight line</option><option value="path">path length</option></select><button id="wSave">Save</button></div>
+    <div class="diag" id="walkSum"></div>
+    <table class="tbl" id="walkTable"></table>
+  </section>
   <section class="card map">
     <canvas id="map"></canvas>
     <div class="mapbtns">
@@ -508,7 +563,7 @@ class Estimator {
   reset(reason) {
     this.status = 'warmup'; this.resetReason = reason || '';
     this.kfs = []; this.kfById = new Map(); this.feats = new Map();
-    this.depthPriors = new Map(); this.da3 = { maps: 0, mode: '', scale: 0, err: 0, vote: 0 };
+    this.depthPriors = new Map(); this.da3 = { maps: 0, mode: '', scale: 0, err: 0, vote: 0, n: 0, vioRatio: NaN, ratios: [] };
     this.traj = []; this.trajById = new Map(); this.mapPts = [];
     this.pose = null; this.lastKfObs = new Map(); this.nextKf = 0;
     this.solveMs = 0; this.lastCost = 0; this.lastIters = 0; this.warm = null; this.lastKfId = -1;
@@ -943,12 +998,18 @@ class Estimator {
     return out;
   }
 
-  // DA3 depth prior: data = raw model output (depth OR inverse depth, unknown scale)
-  addDepthMap(kfId, data, dw, dh) {
+  // DA3 depth prior. data = model output on a dw x dh grid.
+  // opt.map(u, v) -> depth-grid pixel for a processing-image pixel (crop/resize aware).
+  // opt.metric: data is metric depth -> absolute priors (scale observable from vision);
+  // opt.monitorOnly (metric): only measure the VIO/DA3 scale ratio, add no priors.
+  // otherwise it is depth or inverse depth of unknown scale, median-aligned to landmarks.
+  addDepthMap(kfId, data, dw, dh, opt = {}) {
     const kf = this.kfById.get(kfId), cam = this.cam, p = this.p;
     if (!kf || !cam) return null;
+    const map = opt.map || ((u, v) => [u * dw / cam.W - 0.5, v * dh / cam.H - 0.5]);
     const sample = (u, v) => {
-      const x = Math.min(dw - 1.001, Math.max(0, u * dw / cam.W - 0.5)), y = Math.min(dh - 1.001, Math.max(0, v * dh / cam.H - 0.5));
+      const q = map(u, v), x = q[0], y = q[1];
+      if (!(x >= 0 && y >= 0 && x <= dw - 1.001 && y <= dh - 1.001)) return NaN;
       const x0 = x | 0, y0 = y | 0, ax = x - x0, ay = y - y0, i = y0 * dw + x0;
       return (data[i] * (1 - ax) + data[i + 1] * ax) * (1 - ay) + (data[i + dw] * (1 - ax) + data[i + dw + 1] * ax) * ay;
     };
@@ -962,18 +1023,32 @@ class Estimator {
         if (Z > p.minDepth) pairs.push([d, Z]);
       }
     }
-    if (pairs.length < 8) return { ok: false, n: pairs.length };
-    // depth or inverse depth? correlation sign of log(d) vs log(Z), accumulated over maps
-    const ld = pairs.map(q => Math.log(q[0])), lz = pairs.map(q => Math.log(q[1]));
-    const md = ld.reduce((a, b) => a + b) / ld.length, mz = lz.reduce((a, b) => a + b) / lz.length;
-    let cov = 0; for (let i = 0; i < ld.length; i++) cov += (ld[i] - md) * (lz[i] - mz);
-    this.da3.vote += Math.sign(cov);
-    const inv = this.da3.vote < 0;
-    const scale = median(pairs.map(([d, Z]) => inv ? Z * d : Z / d));
-    const toZ = d => inv ? scale / d : scale * d;
-    const err = median(pairs.map(([d, Z]) => Math.abs(toZ(d) - Z) / Z));
-    this.da3 = { maps: this.da3.maps + 1, mode: inv ? 'inverse depth' : 'depth', scale, err, vote: this.da3.vote, n: pairs.length };
-    if (err > 0.5) return { ok: false, err };
+    const D = this.da3;
+    let toZ, scale, err = NaN, inv = false;
+    if (opt.metric) {
+      toZ = d => d; scale = 1;
+      if (pairs.length >= 3) {
+        D.vioRatio = median(pairs.map(([d, Z]) => Z / d));
+        D.ratios.push(D.vioRatio); if (D.ratios.length > 100) D.ratios.shift();
+        err = median(pairs.map(([d, Z]) => Math.abs(d - Z) / Z));
+      }
+      Object.assign(D, { maps: D.maps + 1, mode: 'metric', scale: 1, err, n: pairs.length });
+      if (pairs.length >= 8 && err > 0.6) return { ok: false, err };
+      if (opt.monitorOnly) return { ok: true, scale, err, mode: 'metric (monitor)', n: pairs.length, vioRatio: D.vioRatio };
+    } else {
+      if (pairs.length < 8) return { ok: false, n: pairs.length };
+      // depth or inverse depth? correlation sign of log(d) vs log(Z), accumulated over maps
+      const ld = pairs.map(q => Math.log(q[0])), lz = pairs.map(q => Math.log(q[1]));
+      const md = ld.reduce((a, b) => a + b) / ld.length, mz = lz.reduce((a, b) => a + b) / lz.length;
+      let cov = 0; for (let i = 0; i < ld.length; i++) cov += (ld[i] - md) * (lz[i] - mz);
+      D.vote += Math.sign(cov);
+      inv = D.vote < 0;
+      scale = median(pairs.map(([d, Z]) => inv ? Z * d : Z / d));
+      toZ = d => inv ? scale / d : scale * d;
+      err = median(pairs.map(([d, Z]) => Math.abs(toZ(d) - Z) / Z));
+      Object.assign(D, { maps: D.maps + 1, mode: inv ? 'inverse depth' : 'depth', scale, err, n: pairs.length });
+      if (err > 0.5) return { ok: false, err };
+    }
     const m = new Map();
     for (const [f, d] of all) {
       const Z = toZ(d); if (!(Z > p.minDepth && Z < p.maxDepth)) continue;
@@ -981,7 +1056,7 @@ class Estimator {
       if (f.lm && f.host === kfId) f.prior = { rho: 1 / Z, sigma: p.depthRel / Z };
     }
     this.depthPriors.set(kfId, m);
-    return { ok: true, scale, err, mode: this.da3.mode, n: pairs.length };
+    return { ok: true, scale, err, mode: D.mode, n: pairs.length, vioRatio: D.vioRatio };
   }
 }
 
@@ -1264,7 +1339,10 @@ const SCHEMA = [
   ['da3Model', 'DA3 model: HF repo id, base URL, or direct .onnx URL', 'Depth prior', 'onnx-community/depth-anything-v3-small', 0, 'app'],
   ['da3File', 'DA3 file in repo (auto = pick by backend)', 'Depth prior', 'auto', 0, 'app'],
   ['da3Backend', 'DA3 backend: auto | webgpu | wasm', 'Depth prior', 'auto', 0, 'app'],
-  ['da3Size', 'DA3 input long side (px, multiple of 14)', 'Depth prior', 336, 14, 'app'],
+  ['da3Size', 'DA3 input size (px, multiple of 14)', 'Depth prior', 504, 14, 'app'],
+  ['da3Fit', 'DA3 input fit: square (centre crop) | aspect', 'Depth prior', 'square', 0, 'app'],
+  ['da3Mode', 'DA3 use: relative | metric-monitor (ratio only) | metric (priors set scale)', 'Depth prior', 'relative', 0, 'app'],
+  ['da3Budget', 'Benchmark: max ms per DA3 run to auto-select', 'Depth prior', 500, 50, 'app'],
 ];
 const DEF = Object.fromEntries(SCHEMA.map(s => [s[0], s[3]]));
 const lsGet = k => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) { return null; } };
@@ -1281,6 +1359,8 @@ const S = {
   da3: { on: false, ready: false, loading: false, busy: false, status: 'off', eng: null, ms: 0, runs: 0, aligned: 0, lastRun: 0 },
 };
 const video = $('video');
+S.hist = { solve: [], klt: [], da3: [] };
+const pushHist = (a, v) => { a.push(v); if (a.length > 200) a.shift(); };
 const newEstimator = () => {
   const p = {}; for (const [k, , , , , to] of SCHEMA) if (to === 'est' && k in D) p[k] = SET[k];
   p.td = SET.td / 1000;
@@ -1432,8 +1512,9 @@ function grabFrame(tCam) {
   pctx.drawImage(video, 0, 0, W, H);
   const img = pctx.getImageData(0, 0, W, H), d = img.data, g = new Float32Array(W * H);
   for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
-  S.frameQ.push({ t: tCam, gray: g, img, W, H, wall: performance.now() });
-  if (S.frameQ.length > 3) S.frameQ.shift();
+  const hi = S.da3.on && S.da3.ready ? grabHi() : null;
+  S.frameQ.push({ t: tCam, gray: g, img, hi, W, H, wall: performance.now() });
+  if (S.frameQ.length > 3) releaseHi(S.frameQ.shift().hi);
   pump();
 }
 function onVideoFrame(nowMs, meta) {
@@ -1469,7 +1550,7 @@ function processFrame(fr) {
   const prevPos = S.mode === 'calibrating' ? new Map(trk.pts.map(q => [q.id, [q.x, q.y]])) : null;
   const t0 = performance.now();
   const tracks = trk.process(fr.gray, fr.W, fr.H, predict);
-  S.trackMs = performance.now() - t0;
+  S.trackMs = performance.now() - t0; pushHist(S.hist.klt, S.trackMs);
   if (S.mode === 'calibrating') {
     if (S.prevT != null) {
       const a = [], b = [];
@@ -1480,42 +1561,47 @@ function processFrame(fr) {
   } else if (S.mode === 'running') {
     const r = est.addFrame(fr.t, tracks);
     if (r.kill.length) trk.kill(r.kill);
+    if (r.kf && est.status === 'tracking') pushHist(S.hist.solve, est.solveMs);
     if (r.reset) { S.lastReset = r.reset; setHint(`Estimator reset (${r.reset}) — hold still to re-initialize.`, 'warn'); }
     if (S.da3.on && S.da3.ready && !S.da3.busy) {
-      if (r.kf && est.status === 'tracking') runDA3(est.lastKfId, fr.img);
-      else if (est.status !== 'tracking' && performance.now() - (S.da3.lastRun || 0) > 1500) runDA3(null, fr.img);
+      if (r.kf && est.status === 'tracking') { runDA3(est.lastKfId, fr.hi || fr.img); fr.hi = null; }
+      else if (est.status !== 'tracking' && performance.now() - (S.da3.lastRun || 0) > 1500) { runDA3(null, fr.hi || fr.img); fr.hi = null; }
     }
   }
   S.prevT = fr.t; S.lastTracks = tracks; S.frames++;
+  if (fr.hi) releaseHi(fr.hi);
   drawView(tracks);
 }
 
 // ------------------------------------------------------------------ calibration
-$('bCalib').addEventListener('click', () => {
-  if (S.mode !== 'running') return;
+$('bCalib').addEventListener('click', () => startCalib());
+function startCalib() { return new Promise(resolve => {
+  if (S.mode !== 'running') { resolve(null); return; }
+  S.calibResolve = resolve;
   const imu = new ImuBuf();
   for (const s of S.est.imu.a) imu.push(s.t, s.w, s.a);
   S.calib = { start: performance.now(), pairs: [], imu, bg: S.est.bias().slice() };
   S.mode = 'calibrating'; S.trk.reset(); S.prevT = null;
   setHint('Calibrating: rotate the phone in place (twist and tilt, don\'t walk) for 5 s.');
-});
+}); }
 function finishCalib() {
   const c = S.calib; S.mode = 'solving';
   setHint('Solving calibration…');
   setTimeout(() => {
     let r = null;
     try { r = VIO.calibrate(c.pairs, c.imu, { W: S.W, H: S.H, screenAngle: screenAngle(), bg: c.bg }); } catch (e) { console.error(e); }
-    S.calib = null;
+    S.calib = null; let ok = false;
     if (!r) setHint('Calibration failed: not enough tracked motion. Try again with more rotation.', 'bad');
     else if (r.rms > 0.7 * r.rmsNoComp) setHint(`Calibration inconclusive (residual ${r.rms.toFixed(2)} px vs ${r.rmsNoComp.toFixed(2)} px uncompensated). Rotate more and retry.`, 'warn');
     else {
       SET.fov = Math.round(r.fov * 10) / 10; SET.td = Math.round(r.td * 1000); SET.camOffset = r.offset;
       lsSet(LS_CAL, { fov: SET.fov, td: SET.td, camOffset: SET.camOffset }); saveSettings(); renderSettings();
       S.est.p.td = SET.td / 1000; updateCamera();
-      S.lastCalib = r;
+      S.lastCalib = r; ok = true;
       setHint(`Calibrated: FOV ${SET.fov}°, td ${SET.td} ms, offset ${SET.camOffset}° · residual ${r.rms.toFixed(2)} px (was ${r.rmsNoComp.toFixed(1)} px). Hold still to initialize.`);
     }
     if (S.mode !== 'idle') { S.mode = 'running'; reinit('calibrated'); }
+    const done = S.calibResolve; S.calibResolve = null; if (done) done({ ok, r });
   }, 30);
 }
 
@@ -1583,6 +1669,7 @@ async function loadDA3() {
       if (adapter) {
         f16 = adapter.features.has('shader-f16');
         const info = adapter.info || {};
+        st.adapterInfo = `${info.vendor || '?'} ${info.architecture || ''} f16=${f16}`;
         dlog(`WebGPU adapter: ${info.vendor || '?'} ${info.architecture || ''} ${info.description || ''} · shader-f16=${f16}`);
       } else dlog('WebGPU: no adapter');
     } else dlog('WebGPU: navigator.gpu missing');
@@ -1629,12 +1716,16 @@ async function loadDA3() {
           fixedH: shape && typeof shape[shape.length - 2] === 'number' && shape[shape.length - 2] > 0 ? shape[shape.length - 2] : 0,
           fixedW: shape && typeof shape[shape.length - 1] === 'number' && shape[shape.length - 1] > 0 ? shape[shape.length - 1] : 0,
           outName: sess.outputNames.find(n => /depth|predicted/i.test(n) && !/conf|sky|ray/i.test(n)) || sess.outputNames[0], file: name };
+        eng.extra = planExtraInputs(sess, eng.inName);
+        for (const x of eng.extra) dlog(`extra input ${x.name} [${x.shape}] ${x.type} -> ${x.kind === 'zeros' ? 'zeros (unknown purpose)' : x.kind}`);
+        if (sess.outputNames.length > 1) dlog(`using output ${eng.outName} (of ${sess.outputNames.join(', ')})`);
         st.eng = eng;
         // first run compiles the GPU shaders: time-box it separately
         setStage(`first inference on ${be} (compiling)…`);
         const img = S.pctx && S.W ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(270, 360);
         const tt = performance.now();
         const r = await withTimeout(inferDepth(img), be === 'webgpu' ? 90000 : 180000, `first ${be} inference`);
+        dlog(`network input ${r.inW}×${r.inH} (${r.fit}) · fx=${r.K[0].toFixed(1)} cx=${r.K[2].toFixed(1)} cy=${r.K[5].toFixed(1)}`);
         dlog(`first inference ${Math.round(performance.now() - tt)} ms · output ${eng.outName} ${r.dw}×${r.dh}`);
         const t2 = performance.now(); await inferDepth(img); const warm = Math.round(performance.now() - t2);
         dlog(`warm inference ${warm} ms`);
@@ -1655,34 +1746,87 @@ async function loadDA3() {
   clearInterval(tick);
   st.loading = false;
 }
-// run the model on an ImageData, keep the result for the inset view
-async function inferDepth(img) {
+// Network input geometry: centre-crop the source to the input aspect, then scale.
+// 'square' = W=H=size (crops the long side), 'aspect' = keep the camera aspect.
+function da3Geometry(sw, sh, eng, size, fit) {
+  const r14 = v => Math.max(14, Math.round(v / 14) * 14);
+  let W, H;
+  if (eng.fixedW && eng.fixedH) { W = eng.fixedW; H = eng.fixedH; fit = 'fixed'; }
+  else if (fit === 'square') { W = H = r14(size); }
+  else { const s = size / Math.max(sw, sh); W = r14(sw * s); H = r14(sh * s); }
+  let cw = sw, ch = sh;
+  if (cw / ch > W / H) cw = ch * W / H; else ch = cw * H / W;
+  return { W, H, cw, ch, ox: (sw - cw) / 2, oy: (sh - ch) / 2, sx: W / cw, sy: H / ch, fit };
+}
+// camera pose of a keyframe as 4x4 row-major world->camera / camera->world (OpenCV camera axes)
+function kfPoseMats(kf) {
+  const cam = S.est.cam;
+  if (!kf || !cam) return { w2c: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], c2w: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+  const R = VIO.mm(kf.R, cam.Rbc), p = kf.p, t = VIO.mtv(R, p);
+  return {
+    w2c: [R[0], R[3], R[6], -t[0], R[1], R[4], R[7], -t[1], R[2], R[5], R[8], -t[2], 0, 0, 0, 1],
+    c2w: [R[0], R[1], R[2], p[0], R[3], R[4], R[5], p[1], R[6], R[7], R[8], p[2], 0, 0, 0, 1],
+  };
+}
+// how to fill model inputs other than the image (intrinsics / extrinsics if the export has them)
+function planExtraInputs(sess, inName) {
+  return sess.inputNames.map((name, i) => ({ name, meta: sess.inputMetadata ? sess.inputMetadata[i] : null })).filter(x => x.name !== inName).map(x => {
+    const shape = x.meta && x.meta.shape ? Array.from(x.meta.shape).map(d => (typeof d === 'number' && d > 0) ? d : 1) : [1];
+    const kind = /intrin|^k$|_k$|camera_k|focal/i.test(x.name) ? 'K' : /c2w|cam2world|camera_to_world/i.test(x.name) ? 'c2w' : /extrin|pose|w2c|world2cam|world_to_camera/i.test(x.name) ? 'w2c' : 'zeros';
+    return { name: x.name, shape, type: (x.meta && x.meta.type) || 'float32', kind };
+  });
+}
+function fillExtra(eng, x, K, mats) {
+  const n = x.shape.reduce((a, b) => a * b, 1), v = new Float32Array(n);
+  const src = x.kind === 'K' ? K : x.kind === 'w2c' ? mats.w2c : x.kind === 'c2w' ? mats.c2w : null;
+  if (src) {
+    const per = x.shape[x.shape.length - 1] * (x.shape.length > 1 ? x.shape[x.shape.length - 2] : 1);
+    const blk = per === 12 ? src.slice(0, 12) : per === 16 ? src : per === 9 ? src : per === 4 && x.kind === 'K' ? [K[0], K[4], K[2], K[5]] : null;
+    if (blk) for (let i = 0; i < n; i++) v[i] = blk[i % blk.length];
+  }
+  if (x.type === 'int64') return new eng.ort.Tensor('int64', BigInt64Array.from(v, a => BigInt(Math.round(a))), x.shape);
+  return x.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(v) : floatToHalf(v), x.shape) : new eng.ort.Tensor('float32', v, x.shape);
+}
+// run the model on a canvas or ImageData; returns depth + a proc-pixel -> depth-pixel map
+async function inferDepth(src, o = {}) {
   const st = S.da3, eng = st.eng;
   if (!eng) throw new Error('DA3 engine not loaded');
-  let W = eng.fixedW, H = eng.fixedH;
-  if (!W || !H) {
-    const L = Math.max(14, Math.round(SET.da3Size / 14) * 14), a = img.width / img.height;
-    if (a >= 1) { W = L; H = Math.max(14, Math.round(L / a / 14) * 14); } else { H = L; W = Math.max(14, Math.round(L * a / 14) * 14); }
+  const tAll = performance.now();
+  let srcC = src;
+  if (src instanceof ImageData) {
+    if (!st.src) st.src = document.createElement('canvas');
+    st.src.width = src.width; st.src.height = src.height; st.src.getContext('2d').putImageData(src, 0, 0); srcC = st.src;
   }
-  if (!st.src) { st.src = document.createElement('canvas'); st.dst = document.createElement('canvas'); }
-  st.src.width = img.width; st.src.height = img.height; st.src.getContext('2d').putImageData(img, 0, 0);
-  st.dst.width = W; st.dst.height = H;
+  const sw = srcC.width, sh = srcC.height;
+  const g = da3Geometry(sw, sh, eng, o.size || SET.da3Size, o.fit || SET.da3Fit);
+  if (!st.dst) st.dst = document.createElement('canvas');
+  st.dst.width = g.W; st.dst.height = g.H;
   const dctx = st.dst.getContext('2d', { willReadFrequently: true });
-  dctx.drawImage(st.src, 0, 0, W, H);
-  const px = dctx.getImageData(0, 0, W, H).data, n = W * H, chw = new Float32Array(3 * n);
+  dctx.drawImage(srcC, g.ox, g.oy, g.cw, g.ch, 0, 0, g.W, g.H);
+  const px = dctx.getImageData(0, 0, g.W, g.H).data, n = g.W * g.H, chw = new Float32Array(3 * n);
   for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) chw[c * n + i] = (px[4 * i + c] / 255 - eng.mean[c]) / eng.std[c];
-  const dims = eng.rank === 5 ? [1, 1, 3, H, W] : [1, 3, H, W];
-  const tensor = eng.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(chw) : floatToHalf(chw), dims) : new eng.ort.Tensor('float32', chw, dims);
-  const out = await eng.sess.run({ [eng.inName]: tensor });
-  const o = out[eng.outName], od = o.dims, dh = od[od.length - 2], dw = od[od.length - 1];
-  let data = o.data;
-  data = data instanceof Float32Array ? data : (o.type === 'float16' && data instanceof Uint16Array) ? halfToFloat(data) : Float32Array.from(data);
-  if (data.length !== dw * dh) data = data.subarray(0, dw * dh); // e.g. extra depth/confidence channels
+  const dims = eng.rank === 5 ? [1, 1, 3, g.H, g.W] : [1, 3, g.H, g.W];
+  const feeds = { [eng.inName]: eng.type === 'float16' ? new eng.ort.Tensor('float16', typeof Float16Array !== 'undefined' ? new Float16Array(chw) : floatToHalf(chw), dims) : new eng.ort.Tensor('float32', chw, dims) };
+  // intrinsics at network-input resolution (proc -> source -> crop -> scale)
+  const cam = S.est.cam, ks = cam ? sw / cam.W : 1;
+  const K = cam ? [cam.f * ks * g.sx, 0, (cam.cx * ks - g.ox) * g.sx, 0, cam.f * ks * g.sy, (cam.cy * ks - g.oy) * g.sy, 0, 0, 1]
+    : [g.W, 0, g.W / 2, 0, g.W, g.H / 2, 0, 0, 1];
+  const mats = kfPoseMats(o.kf);
+  for (const x of eng.extra) feeds[x.name] = fillExtra(eng, x, K, mats);
+  const tRun = performance.now();
+  const out = await eng.sess.run(feeds);
+  const ms = performance.now() - tRun;
+  const t = out[eng.outName], od = t.dims, dh = od[od.length - 2], dw = od[od.length - 1];
+  let data = t.data;
+  data = data instanceof Float32Array ? data : (t.type === 'float16' && data instanceof Uint16Array) ? halfToFloat(data) : Float32Array.from(data);
+  if (data.length !== dw * dh) data = data.subarray(0, dw * dh);
+  if (SET.da3Mode.startsWith('metric')) { const fm = 0.5 * (K[0] + K[4]) / 300; data = Float32Array.from(data, v => v * fm); }
   let finite = 0; for (let i = 0; i < data.length; i += 7) if (Number.isFinite(data[i])) finite++;
   if (!finite) throw new Error('depth output is all NaN/Inf (try da3File onnx/model.onnx)');
+  const map = (u, v) => [((u * ks - g.ox) * g.sx + 0.5) * dw / g.W - 0.5, ((v * ks - g.oy) * g.sy + 0.5) * dh / g.H - 0.5];
   drawDepthInset(data, dw, dh);
   st.runs = (st.runs || 0) + 1;
-  return { data, dw, dh };
+  return { data, dw, dh, map, K, ms, totalMs: performance.now() - tAll, inW: g.W, inH: g.H, fit: g.fit };
 }
 function drawDepthInset(data, dw, dh) {
   const s = Array.from({ length: 200 }, (_, i) => data[Math.floor(i * data.length / 200)]).filter(Number.isFinite).sort((a, b) => a - b);
@@ -1699,21 +1843,219 @@ function drawDepthInset(data, dw, dh) {
   $('depthWrap').style.display = 'block';
   $('depthRange').textContent = `${lo.toPrecision(3)}…${hi.toPrecision(3)}`;
 }
-async function runDA3(kfId, img) {
+async function runDA3(kfId, src) {
   const st = S.da3; st.busy = true;
   const t0 = performance.now();
   try {
-    const { data, dw, dh } = await inferDepth(img);
-    if (kfId == null) { st.status = 'running · waiting for tracking to align'; }
+    const kf = kfId != null ? S.est.kfById.get(kfId) : null;
+    const r = await inferDepth(src, { kf });
+    pushHist(S.hist.da3, r.ms);
+    if (kfId == null) st.status = `running ${r.inW}×${r.inH} · waiting for tracking`;
     else {
-      const res = S.est.addDepthMap(kfId, data, dw, dh), da = S.est.da3;
-      if (res && res.ok) { st.aligned = (st.aligned || 0) + 1; st.status = `aligned: ${da.mode} · s=${da.scale.toPrecision(3)} · err ${(100 * da.err).toFixed(0)}%`; }
-      else st.status = !res ? 'keyframe left window before depth arrived'
-        : res.n != null ? `aligning: ${res.n}/8 triangulated landmarks in view — move sideways` : `rejected map: alignment err ${(100 * (res.err || 0)).toFixed(0)}%`;
+      const metric = SET.da3Mode.startsWith('metric');
+      const res = S.est.addDepthMap(kfId, r.data, r.dw, r.dh, { map: r.map, metric, monitorOnly: SET.da3Mode === 'metric-monitor' }), da = S.est.da3;
+      if (res && res.ok) {
+        st.aligned = (st.aligned || 0) + 1;
+        st.status = metric ? `${SET.da3Mode} · VIO÷DA3 scale ${Number.isFinite(da.vioRatio) ? da.vioRatio.toFixed(3) : '–'} · ${res.n} pts · err ${Number.isFinite(da.err) ? (100 * da.err).toFixed(0) + '%' : '–'}`
+          : `aligned: ${da.mode} · s=${da.scale.toPrecision(3)} · err ${(100 * da.err).toFixed(0)}%`;
+      } else st.status = !res ? 'keyframe left window before depth arrived'
+        : res.n != null ? `aligning: ${res.n}/8 triangulated landmarks in view — move sideways` : `rejected map: err ${(100 * (res.err || 0)).toFixed(0)}%`;
     }
   } catch (e) { console.error('DA3 run failed', e); st.status = 'run error: ' + (e.message || e); }
+  finally { if (src instanceof HTMLCanvasElement) releaseHi(src); }
   st.ms = performance.now() - t0; st.busy = false; st.lastRun = performance.now();
 }
+// full-resolution copies of camera frames for DA3 (GPU-side drawImage, no readback)
+const hiPool = [];
+function grabHi() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  let c = hiPool.pop();
+  if (!c || c.width !== vw || c.height !== vh) { c = document.createElement('canvas'); c.width = vw; c.height = vh; }
+  c.getContext('2d').drawImage(video, 0, 0, vw, vh);
+  return c;
+}
+function releaseHi(c) { if (c && hiPool.length < 4 && !hiPool.includes(c)) hiPool.push(c); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ------------------------------------------------------------------ benchmark
+const LS_BENCH = 'pocketvio.bench.v1';
+S.bench = lsGet(LS_BENCH);
+async function benchmarkDA3(onRows) {
+  const st = S.da3, eng = st.eng;
+  if (!eng) throw new Error('install DA3 first');
+  while (st.busy) await sleep(50);
+  st.busy = true;
+  try {
+    const src = S.mode !== 'idle' && video.videoWidth ? grabHi() : S.pctx ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(480, 640);
+    const cfgs = eng.fixedW ? [[eng.fixedW, 'fixed']] : [[280, 'square'], [392, 'square'], [504, 'square'], [504, 'aspect']];
+    const rows = [];
+    for (const [size, fit] of cfgs) {
+      st.status = `benchmark ${size} ${fit}…`;
+      const t0 = performance.now();
+      const first = await withTimeout(inferDepth(src, { size, fit }), 120000, 'benchmark run');
+      const firstMs = performance.now() - t0, times = [], totals = [];
+      for (let i = 0; i < 5; i++) { const r = await inferDepth(src, { size, fit }); times.push(r.ms); totals.push(r.totalMs); }
+      rows.push({ size, fit: first.fit, inW: first.inW, inH: first.inH, outW: first.dw, outH: first.dh, firstMs: Math.round(firstMs), medMs: Math.round(VIO.median(times)), minMs: Math.round(Math.min(...times)), totalMs: Math.round(VIO.median(totals)) });
+      onRows && onRows(rows);
+    }
+    if (src instanceof HTMLCanvasElement) releaseHi(src);
+    S.bench = { date: new Date().toISOString(), backend: eng.be, file: eng.file, adapter: st.adapterInfo || '', ua: navigator.userAgent, rows };
+    lsSet(LS_BENCH, S.bench);
+    dlog('benchmark: ' + rows.map(r => `${r.inW}×${r.inH} ${r.medMs}ms`).join(', '));
+    st.status = `ready · ${eng.be} · ${eng.file} · ${SET.da3Size} ${SET.da3Fit}`;
+    return rows;
+  } finally { st.busy = false; }
+}
+function renderBench(rows) {
+  const el = $('benchTable');
+  if (!rows || !rows.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<tr><th>input</th><th>fit</th><th>first</th><th>median</th><th>w/ prep</th><th></th></tr>' + rows.map((r, i) =>
+    `<tr${r.size === SET.da3Size && r.fit === SET.da3Fit ? ' class="sel"' : ''}><td>${r.inW}×${r.inH}</td><td>${r.fit}</td><td>${r.firstMs} ms</td><td><b>${r.medMs} ms</b></td><td>${r.totalMs} ms</td><td><button data-use="${i}">Use</button></td></tr>`).join('');
+}
+$('benchTable').addEventListener('click', e => {
+  const i = e.target.dataset && e.target.dataset.use; if (i == null || !S.bench) return;
+  const r = S.bench.rows[+i]; SET.da3Size = r.size; SET.da3Fit = r.fit === 'fixed' ? SET.da3Fit : r.fit; saveSettings(); renderSettings(); renderBench(S.bench.rows);
+});
+
+// ------------------------------------------------------------------ IMU rest check
+async function imuRestCheck(sec) {
+  await sleep(sec * 1000);
+  const t1 = S.est.imu.lastT(), A = S.est.imu.range(t1 - sec, t1);
+  if (A.length < 50) throw new Error('not enough IMU samples (' + A.length + ')');
+  const rate = (A.length - 1) / (A[A.length - 1].t - A[0].t);
+  const stat = key => { const m = [0, 0, 0], v = [0, 0, 0];
+    for (const s of A) for (let k = 0; k < 3; k++) m[k] += s[key][k] / A.length;
+    for (const s of A) for (let k = 0; k < 3; k++) v[k] += (s[key][k] - m[k]) ** 2 / A.length;
+    return { m, sd: Math.sqrt((v[0] + v[1] + v[2]) / 3) }; };
+  const g = stat('w'), a = stat('a');
+  const ng = g.sd / Math.sqrt(rate), na = a.sd / Math.sqrt(rate);
+  return { rate, bg: g.m, gStd: g.sd, aStd: a.sd, ng, na, gNorm: norm3(a.m), still: g.sd < 0.05 && a.sd < 0.15,
+    ngSug: Math.min(0.02, Math.max(0.001, 5 * ng)), naSug: Math.min(0.2, Math.max(0.01, 5 * na)) };
+}
+
+// ------------------------------------------------------------------ walk scale test
+const LS_WALK = 'pocketvio.walks.v1';
+S.walks = lsGet(LS_WALK) || [];
+const da3Desc = () => S.da3.on && S.da3.ready ? `DA3 ${SET.da3Mode} ${SET.da3Size} ${SET.da3Fit}` : 'VIO only';
+$('wStart').addEventListener('click', () => {
+  const est = S.est;
+  if (est.status !== 'tracking' || !est.pose) { setHint('Walk test needs tracking: start and initialize first.', 'warn'); return; }
+  S.walk = { p0: est.pose.p.slice(), L0: est.pathLength(), resets: est.resets, t0: performance.now(), mode: da3Desc() };
+  $('wEnd').disabled = false; $('walkSave').hidden = true;
+});
+$('wEnd').addEventListener('click', () => {
+  if (!S.walk) return;
+  const w = S.walk, est = S.est;
+  w.valid = est.resets === w.resets && est.pose;
+  w.straight = w.valid ? norm3(sub3(est.pose.p, w.p0)) : NaN; w.path = w.valid ? est.pathLength() - w.L0 : NaN; w.dt = (performance.now() - w.t0) / 1000;
+  w.done = true; $('wEnd').disabled = true; $('walkSave').hidden = !w.valid;
+  if (!w.valid) setHint('Tracking reset during the walk — that test is invalid, start again.', 'warn');
+});
+$('wSave').addEventListener('click', () => {
+  const w = S.walk, truth = Number($('wTruth').value), kind = $('wKind').value;
+  if (!w || !w.done || !(truth > 0)) { setHint('Enter the true distance in metres.', 'warn'); return; }
+  const estD = kind === 'path' ? w.path : w.straight;
+  S.walks.push({ date: new Date().toISOString(), kind, est: +estD.toFixed(3), truth, ratio: +(estD / truth).toFixed(4), straight: +w.straight.toFixed(3), path: +w.path.toFixed(3), secs: +w.dt.toFixed(1), mode: w.mode });
+  lsSet(LS_WALK, S.walks); S.walk = null; $('walkSave').hidden = true; $('wTruth').value = ''; renderWalks();
+});
+$('wClear').addEventListener('click', () => { if (confirm('Delete all walk test results?')) { S.walks = []; lsSet(LS_WALK, S.walks); renderWalks(); } });
+function renderWalks() {
+  const W = S.walks, el = $('walkTable');
+  if (!W.length) { el.innerHTML = '<tr><td class="muted">No walk tests yet. Walk a measured straight line (≥ 5 m), then enter its length.</td></tr>'; $('walkSum').textContent = ''; return; }
+  const byMode = {};
+  for (const w of W) (byMode[w.mode] = byMode[w.mode] || []).push(w.ratio);
+  $('walkSum').textContent = Object.entries(byMode).map(([m, r]) => { const mu = r.reduce((a, b) => a + b, 0) / r.length, sd = Math.sqrt(r.reduce((a, b) => a + (b - mu) ** 2, 0) / r.length);
+    return `${m}: scale ${mu.toFixed(3)} ± ${sd.toFixed(3)} (n=${r.length}, mean |err| ${(100 * r.reduce((a, b) => a + Math.abs(b - 1), 0) / r.length).toFixed(1)}%)`; }).join('\n');
+  el.innerHTML = '<tr><th>est</th><th>true</th><th>ratio</th><th>mode</th></tr>' + W.slice(-12).reverse().map(w => `<tr><td>${w.est.toFixed(2)} m</td><td>${w.truth} m</td><td><b>${w.ratio.toFixed(3)}</b></td><td>${w.mode}</td></tr>`).join('');
+}
+renderWalks();
+
+// ------------------------------------------------------------------ report
+function buildReport() {
+  return JSON.stringify({ app: 'pocket-vio', date: new Date().toISOString(), ua: navigator.userAgent, setup: SETUP, calib: { fov: SET.fov, td: SET.td, offset: SET.camOffset, last: S.lastCalib },
+    imu: S.imuCheck || null, bench: S.bench || null, da3: { status: S.da3.status, mode: SET.da3Mode, size: SET.da3Size, fit: SET.da3Fit, vioRatio: S.est.da3.vioRatio, log: da3Log.slice(-30) },
+    live: { fps: S.fps, imuRate: S.imuRate, solveMs: VIO.median(S.hist.solve), kltMs: VIO.median(S.hist.klt), da3Ms: VIO.median(S.hist.da3) }, walks: S.walks, settings: SET }, null, 1);
+}
+async function copyReport() {
+  const txt = buildReport();
+  try { await navigator.clipboard.writeText(txt); setHint('Report copied to clipboard — paste it to Claude.'); }
+  catch (e) { download(`pocketvio_report_${stamp()}.json`, txt, 'application/json'); }
+}
+
+// ------------------------------------------------------------------ first-time setup
+const LS_SETUP = 'pocketvio.setup.v1';
+const SETUP = lsGet(LS_SETUP) || { done: false, steps: {} };
+const STEP_IDS = ['sensors', 'da3', 'bench', 'calib', 'imu', 'scale'];
+function stepState(id, state, text) { SETUP.steps[id] = { state, text, t: Date.now() }; lsSet(LS_SETUP, SETUP); renderSetup(); }
+function renderSetup() {
+  for (const id of STEP_IDS) {
+    const s = SETUP.steps[id] || { state: 'todo', text: '' };
+    const chip = $('st_' + id); chip.textContent = { todo: 'to do', running: 'running…', ok: 'done', fail: 'failed', skip: 'skipped' }[s.state] || s.state; chip.className = 'stchip ' + s.state;
+    $('res_' + id).textContent = s.text || '';
+  }
+  if (S.bench) renderBench(S.bench.rows);
+}
+const openSetup = () => { $('setup').hidden = false; renderSetup(); $('setup').scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+$('bSetup').addEventListener('click', () => $('setup').hidden ? openSetup() : ($('setup').hidden = true));
+$('setupClose').addEventListener('click', () => { $('setup').hidden = true; });
+$('setupFinish').addEventListener('click', () => { SETUP.done = true; lsSet(LS_SETUP, SETUP); $('setup').hidden = true; setHint('Setup saved. Re-open it any time with the Setup button.'); });
+$('setupCopy').addEventListener('click', copyReport);
+const needRunning = id => { if (S.mode === 'idle') { stepState(id, 'fail', 'Do step 1 first (camera and sensors must be running).'); return false; } return true; };
+$('ss_sensors').addEventListener('click', () => {
+  const permP = (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') ? DeviceMotionEvent.requestPermission() : null;
+  stepState('sensors', 'running', 'starting camera and sensors…');
+  (S.mode === 'idle' ? start(permP) : Promise.resolve()).then(async () => {
+    await sleep(3500);
+    const ok = S.mode !== 'idle' && S.imuRate > 50 && S.fps > 5;
+    stepState('sensors', ok ? 'ok' : 'fail', `camera ${video.videoWidth}×${video.videoHeight} @ ${S.fps.toFixed(0)} fps · IMU ${S.imuRate.toFixed(0)} Hz (${S.imuSrc})` + (ok ? '' : ' — see diagnostics at the bottom'));
+  });
+});
+$('ss_da3').addEventListener('click', async () => {
+  try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { /* optional */ }
+  S.da3.on = true; $('da3').checked = true;
+  stepState('da3', 'running', 'downloading and building the model (status under the DA3 toggle)…');
+  if (!S.da3.ready) { if (S.da3.loading) { while (S.da3.loading) await sleep(200); } else await loadDA3(); }
+  if (!S.da3.ready) { stepState('da3', 'fail', S.da3.status + ' — the DA3 log under the toggle has details'); return; }
+  stepState('da3', 'ok', `${S.da3.eng.be} · ${S.da3.eng.file} · inputs: ${[S.da3.eng.inName, ...S.da3.eng.extra.map(x => `${x.name}(${x.kind})`)].join(', ')}`);
+  $('ss_bench').click();
+});
+$('ss_da3skip').addEventListener('click', () => stepState('da3', 'skip', 'VIO will run without the depth prior.'));
+$('ss_bench').addEventListener('click', async () => {
+  if (!S.da3.ready) { stepState('bench', 'fail', 'Install DA3 first.'); return; }
+  stepState('bench', 'running', 'timing DA3 at several input sizes…');
+  try {
+    const rows = await benchmarkDA3(renderBench);
+    const fit = rows.filter(r => r.medMs <= SET.da3Budget).sort((a, b) => b.inW * b.inH - a.inW * a.inH || (a.fit === 'square' ? -1 : 1));
+    const pick = fit[0] || rows.reduce((a, b) => a.medMs <= b.medMs ? a : b);
+    SET.da3Size = pick.size; if (pick.fit !== 'fixed') SET.da3Fit = pick.fit; saveSettings(); renderSettings(); renderBench(rows);
+    stepState('bench', 'ok', `selected ${pick.inW}×${pick.inH} (${pick.medMs} ms, budget ${SET.da3Budget} ms). Tap Use on another row to change.`);
+  } catch (e) { stepState('bench', 'fail', e.message); }
+});
+$('ss_calib').addEventListener('click', async () => {
+  if (!needRunning('calib')) return;
+  stepState('calib', 'running', 'rotate the phone in place (twist and tilt) for 5 s…');
+  const r = await startCalib();
+  if (r && r.ok) stepState('calib', 'ok', `FOV ${SET.fov}° · td ${SET.td} ms · offset ${SET.camOffset}° · residual ${r.r.rms.toFixed(2)} px (uncompensated ${r.r.rmsNoComp.toFixed(1)} px)`);
+  else stepState('calib', 'fail', r && r.r ? `inconclusive: residual ${r.r.rms.toFixed(2)} px vs ${r.r.rmsNoComp.toFixed(1)} px — rotate more and retry` : 'not enough tracked motion — point at texture and retry');
+});
+$('ss_imu').addEventListener('click', async () => {
+  if (!needRunning('imu')) return;
+  stepState('imu', 'running', 'lay the phone flat on a table and don\'t touch it (3 s)…');
+  try {
+    const r = await imuRestCheck(3); S.imuCheck = r;
+    $('ss_imuApply').hidden = !r.still;
+    stepState('imu', r.still ? 'ok' : 'fail', `${r.rate.toFixed(0)} Hz · gyro bias ${r.bg.map(v => v.toFixed(4)).join(' ')} rad/s · gyro σ ${r.gStd.toFixed(4)} · accel σ ${r.aStd.toFixed(3)} · |g| ${r.gNorm.toFixed(3)}` +
+      (r.still ? ` · suggested noise: gyro ${r.ngSug.toPrecision(2)}, accel ${r.naSug.toPrecision(2)} (current ${SET.ng}, ${SET.na})` : ' — phone moved, retry'));
+  } catch (e) { stepState('imu', 'fail', e.message); }
+});
+$('ss_imuApply').addEventListener('click', () => {
+  const r = S.imuCheck; if (!r) return;
+  SET.ng = +r.ngSug.toPrecision(2); SET.na = +r.naSug.toPrecision(2); S.est.p.ng = SET.ng; S.est.p.na = SET.na; saveSettings(); renderSettings();
+  $('ss_imuApply').hidden = true; stepState('imu', 'ok', SETUP.steps.imu.text + ' · applied');
+});
+$('ss_scale').addEventListener('click', () => { stepState('scale', 'ok', 'Use the Walk scale test card to log measured walks.'); $('walkCard').scrollIntoView({ behavior: 'smooth' }); });
+renderSetup();
+if (!SETUP.done) $('setup').hidden = false;
 
 // ------------------------------------------------------------------ export
 $('bExport').addEventListener('click', () => $('exportBox').classList.toggle('open'));
@@ -1860,6 +2202,8 @@ const RO = [
   ['FOV / td / offset', () => `${f2(SET.fov, 1)}° / ${SET.td} ms / ${SET.camOffset}°`],
   ['DA3', () => S.da3.status + (S.da3.ms ? ` · ${f2(S.da3.ms, 0)}ms` : ''), true],
   ['DA3 in solver', () => { const n = S.est.da3Stats(); return `${n.withPrior} landmarks with prior · ${n.fromDA3} initialized by DA3 · ${S.da3.aligned || 0}/${S.da3.runs || 0} maps aligned`; }, true],
+  ['scale VIO÷DA3 (metric)', () => SET.da3Mode.startsWith('metric') && Number.isFinite(S.est.da3.vioRatio) ? `${S.est.da3.vioRatio.toFixed(3)} (median of ${S.est.da3.ratios.length}: ${VIO.median(S.est.da3.ratios).toFixed(3)})` : '–'],
+  ['median timing', () => `solve ${f2(VIO.median(S.hist.solve), 0)} · klt ${f2(VIO.median(S.hist.klt), 0)} · DA3 ${f2(VIO.median(S.hist.da3), 0)} ms`, true],
   ['last reset', () => S.lastReset || '–'],
 ];
 $('ro').innerHTML = RO.map(([k, , wide], i) => `<div class="ro${wide ? ' wide' : ''}"><b>${k}</b><span id="ro${i}">–</span></div>`).join('');
@@ -1868,6 +2212,10 @@ function updateReadouts() {
   const t = performance.now(), dt = (t - lastCount.t) / 1000;
   if (dt >= 1) { S.imuRate = (S.imuCount - lastCount.imu) / dt; S.fps = (S.frames - lastCount.frames) / dt; lastCount = { t, imu: S.imuCount, frames: S.frames }; }
   RO.forEach(([, fn], i) => { $('ro' + i).textContent = fn(); });
+  if (S.walk && !S.walk.done) {
+    const est = S.est, ok = est.resets === S.walk.resets && est.pose;
+    $('walkLive').textContent = ok ? `walking ${((performance.now() - S.walk.t0) / 1000).toFixed(0)} s · straight ${norm3(sub3(est.pose.p, S.walk.p0)).toFixed(2)} m · path ${(est.pathLength() - S.walk.L0).toFixed(2)} m` : 'tracking reset — this test is invalid';
+  } else if (S.walk && S.walk.done) $('walkLive').textContent = S.walk.valid ? `result: straight ${S.walk.straight.toFixed(2)} m · path ${S.walk.path.toFixed(2)} m · ${S.walk.dt.toFixed(0)} s — enter the true distance` : 'invalid (tracking reset)';
   $('da3Status').textContent = S.da3.status;
   const st = S.mode === 'idle' ? 'idle' : (S.mode === 'calibrating' || S.mode === 'solving') ? 'calibrating' : S.est.status;
   const chip = $('chip'); chip.className = 'chip ' + st; chip.textContent = st;
@@ -1912,7 +2260,7 @@ function applySetting(sc) {
   else if (to === 'trk') { Object.assign(S.trk.p, trkParams()); if (k === 'levels' || k === 'win') S.trk.reset(); }
   else if (to === 'cam') { if (k === 'procSize') S.proc = null; else updateCamera(); if (S.mode === 'running') reinit('camera setting changed'); }
   else if (k === 'imuFreq' && S.mode !== 'idle') { stopSensors(); startSensors(); }
-  else if (k.startsWith('da3') && k !== 'da3Size') { S.da3.ready = false; S.da3.eng = null; if (S.da3.on && !S.da3.loading) loadDA3(); }
+  else if (k.startsWith('da3') && !['da3Size', 'da3Fit', 'da3Mode', 'da3Budget'].includes(k)) { S.da3.ready = false; S.da3.eng = null; if (S.da3.on && !S.da3.loading) loadDA3(); }
 }
 $('sDefaults').addEventListener('click', () => {
   for (const s of SCHEMA) SET[s[0]] = s[3];

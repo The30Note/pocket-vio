@@ -82,7 +82,7 @@ function inv3(A) {
 }
 
 // ------------------------------------------------------------ VIO test
-function testVIO({ seconds = 30, seed = 1, da3 = false, td = 0, label = 'VIO' } = {}) {
+function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, label = 'VIO' } = {}) {
   const R = rng(seed), tStatic = 2.0, mo = makeMotion(tStatic);
   const W = 270, H = 360, cam = makeCam(W, H, 65, 0);
   const bgT = [0.012, -0.018, 0.009], baT = [0.06, -0.08, 0.1];
@@ -152,8 +152,9 @@ function testVIO({ seconds = 30, seed = 1, da3 = false, td = 0, label = 'VIO' } 
           const x = Math.floor(r.q[0] * dw / W), y = Math.floor(r.q[1] * dh / H);
           for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) { const xx = x + i, yy = y + j; if (xx < 0 || yy < 0 || xx >= dw || yy >= dh) continue;
             const o = yy * dw + xx; if (zb[o] === 0 || r.Z < zb[o]) zb[o] = r.Z; } }
-        for (let i = 0; i < zb.length; i++) data[i] = zb[i] > 0 ? 3.7 / zb[i] * (1 + 0.1 * R.n()) : 0;
-        est.addDepthMap(kf.id, data, dw, dh);
+        const metric = da3 === 'metric' || da3 === 'monitor', monitorOnly = da3 === 'monitor';
+        for (let i = 0; i < zb.length; i++) data[i] = zb[i] > 0 ? (metric ? metricBias * zb[i] : 3.7 / zb[i]) * (1 + 0.1 * R.n()) : 0;
+        est.addDepthMap(kf.id, data, dw, dh, { metric, monitorOnly });
       }
     }
     if (est.status === 'tracking' && est.pose) errLive.push(norm3(sub3(est.pose.p, mo.pos(est.pose.t))));
@@ -173,11 +174,12 @@ function testVIO({ seconds = 30, seed = 1, da3 = false, td = 0, label = 'VIO' } 
   console.log(`  scale(sim3)=${al.s.toFixed(4)}  ATE raw=${ateRaw.toFixed(3)} m  ATE sim3=${ateSim3.toFixed(3)} m  final pos err=${norm3(sub3(E[E.length - 1], G[G.length - 1])).toFixed(3)} m  final rot err=${yawErr.toFixed(2)}°`);
   console.log(`  live (IMU-propagated) error: rms ${rms(errLive).toFixed(3)} m, max ${Math.max(...errLive).toFixed(3)} m`);
   console.log(`  bias est bg=[${kfLast.bg.map(v => v.toFixed(4))}] true≈[${bgD.map(v => v.toFixed(4))}]  ba=[${kfLast.ba.map(v => v.toFixed(3))}] true≈[${baD.map(v => v.toFixed(3))}]`);
-  if (da3) console.log(`  DA3 prior: mode=${est.da3.mode} scale=${est.da3.scale.toFixed(3)} relErr=${est.da3.err.toFixed(3)} maps=${est.da3.maps}`);
+  if (da3) console.log(`  DA3 prior: mode=${est.da3.mode} scale=${est.da3.scale.toFixed(3)} relErr=${est.da3.err.toFixed(3)} maps=${est.da3.maps} VIO/DA3=${est.da3.vioRatio}`);
   check(`${label} no resets`, resets === 0 && est.resets === startResets, `resets=${resets}`);
-  check(`${label} metric scale ≈ 1`, Math.abs(al.s - 1) < 0.05, `scale=${al.s.toFixed(4)}`);
+  if (metricBias === 1) check(`${label} metric scale ≈ 1`, Math.abs(al.s - 1) < 0.05, `scale=${al.s.toFixed(4)}`);
+  else console.log(`  INFO  ${label}: DA3 metric bias ×${metricBias} -> trajectory scale ${(1 / al.s).toFixed(4)} (1 = unaffected)`);
   check(`${label} trajectory error small`, ateRaw < Math.max(0.1, 0.03 * pathGT), `ATE raw=${ateRaw.toFixed(3)} m over ${pathGT.toFixed(1)} m (${(100 * ateRaw / pathGT).toFixed(2)}%)`);
-  if (da3) check(`${label} depth mode detected`, est.da3.mode === 'inverse depth', est.da3.mode);
+  if (da3 === true) check(`${label} depth mode detected`, est.da3.mode === 'inverse depth', est.da3.mode);
 }
 
 // ------------------------------------------------------ calibration test
@@ -208,5 +210,8 @@ if (run('calib')) testCalib();
 if (run('vio')) testVIO({ seconds: opt('seconds', 30), seed: opt('seed', 1) });
 if (run('td')) testVIO({ seconds: 20, seed: 2, td: 0.025, label: 'VIO (td=25ms)' });
 if (run('da3')) testVIO({ seconds: 20, seed: 4, da3: true, label: 'VIO + DA3 prior' });
+if (run('metric')) testVIO({ seconds: 20, seed: 4, da3: 'metric', label: 'VIO + DA3 metric' });
+if (run('monitor')) testVIO({ seconds: 20, seed: 4, da3: 'monitor', metricBias: 1.1, label: 'VIO + DA3 metric-monitor (10% biased)' });
+if (run('metricbias')) testVIO({ seconds: 20, seed: 4, da3: 'metric', metricBias: 1.1, label: 'VIO + DA3 metric (10% biased)' });
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nall checks passed');
 process.exit(failures ? 1 : 0);
