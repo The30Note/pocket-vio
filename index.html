@@ -15,7 +15,7 @@
   --bg: #f4f5f2; --surface: #ffffff; --surface-2: #eceee9; --border: #d9dcd4;
   --text: #171a16; --muted: #626a5f; --accent: #2f6fdf; --accent-ink: #ffffff;
   --ok: #1c9a5a; --warn: #d98a00; --bad: #d23f3f; --grid: rgba(23, 26, 22, .10);
-  --traj: #2f6fdf; --lm: #1c9a5a; --pts: rgba(70, 76, 68, .55); --frustum: #d23f3f;
+  --traj: #2f6fdf; --lm: #1c9a5a; --da3: #9b4dff; --pts: rgba(70, 76, 68, .55); --frustum: #d23f3f;
   --radius: 14px; --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.05);
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -24,7 +24,7 @@
     --bg: #121412; --surface: #1b1e1b; --surface-2: #232723; --border: #313631;
     --text: #e9ece6; --muted: #9aa396; --accent: #6b9cff; --accent-ink: #0d1530;
     --ok: #3ccf84; --warn: #ffb020; --bad: #ff6b6b; --grid: rgba(233, 236, 230, .10);
-    --traj: #6b9cff; --lm: #3ccf84; --pts: rgba(200, 206, 196, .5); --frustum: #ff6b6b;
+    --traj: #6b9cff; --lm: #3ccf84; --da3: #b98cff; --pts: rgba(200, 206, 196, .5); --frustum: #ff6b6b;
     --shadow: none;
   }
 }
@@ -32,7 +32,7 @@
   --bg: #121412; --surface: #1b1e1b; --surface-2: #232723; --border: #313631;
   --text: #e9ece6; --muted: #9aa396; --accent: #6b9cff; --accent-ink: #0d1530;
   --ok: #3ccf84; --warn: #ffb020; --bad: #ff6b6b; --grid: rgba(233, 236, 230, .10);
-  --traj: #6b9cff; --lm: #3ccf84; --pts: rgba(200, 206, 196, .5); --frustum: #ff6b6b;
+  --traj: #6b9cff; --lm: #3ccf84; --da3: #b98cff; --pts: rgba(200, 206, 196, .5); --frustum: #ff6b6b;
   --shadow: none;
 }
 * { box-sizing: border-box; }
@@ -59,6 +59,10 @@ header.top { position: sticky; top: 0; z-index: 5; display: flex; align-items: c
   color: #fff; background: rgba(0,0,0,.45); padding: 6px 8px; border-radius: 8px; }
 .cam .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
 .cam .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #b9beb5; font-size: 14px; text-align: center; padding: 16px; }
+.depthwrap { display: none; position: absolute; top: 10px; right: 10px; width: 28%; border-radius: 8px; overflow: hidden; border: 1px solid rgba(255,255,255,.5); background: #000; }
+.depthwrap canvas { display: block; width: 100%; height: auto; }
+.depthwrap span { position: absolute; left: 0; right: 0; bottom: 0; font: 500 10px/1.4 var(--mono); color: #fff; background: rgba(0,0,0,.55); padding: 2px 5px; }
+.depthwrap em { font-style: normal; opacity: .8; }
 #video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .hint { border-radius: var(--radius); padding: 10px 14px; background: color-mix(in srgb, var(--accent) 12%, var(--surface));
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); font-size: 14px; }
@@ -85,6 +89,8 @@ button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 18%, 
 .readouts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1px; background: var(--border); }
 .ro { background: var(--surface); padding: 9px 12px; min-width: 0; }
 .ro b { display: block; font: 500 11px/1.2 Inter, sans-serif; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.ro.wide { grid-column: 1 / -1; }
+.ro.wide span { white-space: normal; }
 .ro span { display: block; font: 500 14px/1.35 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
 .sgroup { padding: 4px 14px 10px; }
@@ -107,7 +113,8 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
   <section class="card cam">
     <canvas id="view" width="270" height="360"></canvas>
     <div class="empty" id="camEmpty">Back camera preview appears here</div>
-    <div class="legend"><span><i style="background:var(--lm)"></i>landmark</span><span><i style="background:var(--warn)"></i>track</span></div>
+    <div class="legend"><span><i style="background:var(--lm)"></i>landmark</span><span><i style="background:var(--da3)"></i>DA3 prior</span><span><i style="background:var(--warn)"></i>track</span></div>
+    <div class="depthwrap" id="depthWrap"><canvas id="depthInset"></canvas><span>DA3 <em id="depthRange"></em></span></div>
     <video id="video" playsinline muted autoplay></video>
   </section>
   <div id="hint" class="hint">Tap <b>Start</b>, then hold the phone still for a second, pointed at a textured scene.</div>
@@ -122,7 +129,7 @@ details.settings summary { padding: 14px; font-weight: 600; cursor: pointer; }
     <button id="eTum">Trajectory (TUM .txt)</button>
     <button id="ePly">Map points (PLY)</button>
   </div>
-  <label class="card toggle"><input type="checkbox" id="da3"> DA3 depth prior <span class="sub" id="da3Status">off</span></label>
+  <label class="card toggle"><input type="checkbox" id="da3"> <span style="white-space:nowrap">DA3 depth prior</span> <span class="sub" id="da3Status">off</span></label>
   <section class="card map">
     <canvas id="map"></canvas>
     <div class="mapbtns">
@@ -711,7 +718,7 @@ class Estimator {
         for (const [kid, o] of f.obs) {
           const dp = this.depthPriors.get(kid), r = dp && dp.get(f.id);
           if (!r) continue;
-          f.lm = true; f.host = kid; f.b = cam.bearing(o[0], o[1]); f.rho = r; f.prior = { rho: r, sigma: p.depthRel * r };
+          f.lm = true; f.fromDA3 = true; f.host = kid; f.b = cam.bearing(o[0], o[1]); f.rho = r; f.prior = { rho: r, sigma: p.depthRel * r };
           break;
         }
       }
@@ -923,6 +930,11 @@ class Estimator {
   }
   pathLength() {
     let s = 0; for (let i = 1; i < this.traj.length; i++) s += norm3(sub3(this.traj[i].p, this.traj[i - 1].p)); return s;
+  }
+  da3Stats() {
+    let withPrior = 0, fromDA3 = 0;
+    for (const f of this.feats.values()) if (f.lm) { if (f.prior) withPrior++; if (f.fromDA3) fromDA3++; }
+    return { withPrior, fromDA3 };
   }
   windowLandmarks() {
     const out = [];
@@ -1262,7 +1274,7 @@ const S = {
   W: 0, H: 0, proc: null, pctx: null, frameQ: [], prevT: null, pumpTimer: 0,
   imuCount: 0, imuRate: 0, frames: 0, fps: 0, trackMs: 0, lastTracks: [], imuSrc: '-',
   calib: null, lastCalib: null, lastReset: '', vfcSupported: 'requestVideoFrameCallback' in HTMLVideoElement.prototype,
-  da3: { on: false, ready: false, loading: false, busy: false, status: 'off', pipe: null, RawImage: null, ms: 0 },
+  da3: { on: false, ready: false, loading: false, busy: false, status: 'off', pipe: null, RawImage: null, ms: 0, runs: 0, aligned: 0, lastRun: 0 },
 };
 const video = $('video');
 const newEstimator = () => {
@@ -1465,7 +1477,10 @@ function processFrame(fr) {
     const r = est.addFrame(fr.t, tracks);
     if (r.kill.length) trk.kill(r.kill);
     if (r.reset) { S.lastReset = r.reset; setHint(`Estimator reset (${r.reset}) — hold still to re-initialize.`, 'warn'); }
-    if (r.kf && est.status === 'tracking' && S.da3.on && S.da3.ready && !S.da3.busy) runDA3(est.lastKfId, fr.img);
+    if (S.da3.on && S.da3.ready && !S.da3.busy) {
+      if (r.kf && est.status === 'tracking') runDA3(est.lastKfId, fr.img);
+      else if (est.status !== 'tracking' && performance.now() - (S.da3.lastRun || 0) > 1500) runDA3(null, fr.img);
+    }
   }
   S.prevT = fr.t; S.lastTracks = tracks; S.frames++;
   drawView(tracks);
@@ -1501,22 +1516,52 @@ function finishCalib() {
 }
 
 // ------------------------------------------------------------------ DA3 depth prior
-const DA3_LIB = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0';
+// Every stage is reported in the DA3 status line; the latest depth map is drawn as
+// an inset on the camera view, and landmarks carrying a DA3 prior are drawn purple.
+const DA3_LIB = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.0';
 $('da3').addEventListener('change', e => { S.da3.on = e.target.checked; if (S.da3.on && !S.da3.ready && !S.da3.loading) loadDA3(); if (!S.da3.on && S.da3.ready) S.da3.status = 'ready (paused)'; });
 async function loadDA3() {
-  const st = S.da3; st.loading = true; st.status = 'loading library…';
+  const st = S.da3; st.loading = true; st.error = ''; st.status = 'loading Transformers.js…';
+  let tick = 0;
   try {
     const T = await import(DA3_LIB);
     if (!navigator.gpu) throw new Error('WebGPU not available in this browser');
-    st.status = 'loading model…';
-    st.pipe = await T.pipeline('depth-estimation', SET.da3Model, {
-      device: 'webgpu', dtype: 'fp16',
-      progress_callback: p => { if (p && p.status === 'progress' && p.total) st.status = `downloading ${Math.round(p.progress)}%`; },
-    });
-    st.RawImage = T.RawImage; st.ready = true; st.status = 'ready';
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error('WebGPU has no adapter (check chrome://gpu)');
+    const files = {};
+    const t0 = performance.now();
+    const progress = p => {
+      if (!p) return;
+      if (p.status === 'progress' && p.file) {
+        files[p.file] = p.progress || 0;
+        const v = Object.values(files), avg = v.reduce((a, b) => a + b, 0) / v.length;
+        st.status = avg < 99.9 ? `downloading ${Math.round(avg)}% (${v.length} file${v.length > 1 ? 's' : ''})` : 'building WebGPU session…';
+      } else if (p.status === 'done' && Object.values(files).every(x => x >= 99.9)) st.status = 'building WebGPU session…';
+    };
+    // session build has no progress events: show elapsed time so it never looks frozen
+    tick = setInterval(() => { if (/session|fp32/.test(st.status)) st.status = st.status.replace(/ \d+ s$/, '') + ` ${Math.round((performance.now() - t0) / 1000)} s`; }, 1000);
+    const load = dtype => T.pipeline('depth-estimation', SET.da3Model, { device: 'webgpu', dtype, progress_callback: progress });
+    try { st.pipe = await load('fp16'); st.dtype = 'fp16'; }
+    catch (e16) {
+      console.warn('DA3 fp16 failed', e16);
+      st.status = `fp16 failed (${e16.message}); trying fp32…`;
+      st.pipe = await load('fp32'); st.dtype = 'fp32';
+    }
+    st.RawImage = T.RawImage;
+    clearInterval(tick);
+    // test inference so a broken model shows up now, not at the first keyframe
+    st.status = 'test inference…';
+    const img = S.pctx && S.W ? S.pctx.getImageData(0, 0, S.W, S.H) : new ImageData(64, 48);
+    const t1 = performance.now();
+    const r = await inferDepth(img);
+    st.ready = true;
+    st.status = `ready (${st.dtype}) · test ${Math.round(performance.now() - t1)} ms · ${r.dw}×${r.dh}`;
   } catch (e) {
-    st.status = 'error: ' + (e.message || e); st.on = false; $('da3').checked = false;
+    console.error('DA3 load failed', e);
+    st.error = e.message || String(e);
+    st.status = 'error: ' + st.error; st.on = false; $('da3').checked = false;
   }
+  clearInterval(tick);
   st.loading = false;
 }
 function halfToFloat(u16) {
@@ -1527,25 +1572,54 @@ function halfToFloat(u16) {
   }
   return out;
 }
+// run the model on an ImageData, keep the result for the inset view
+async function inferDepth(img) {
+  const st = S.da3, n = img.width * img.height, rgb = new Uint8ClampedArray(3 * n);
+  for (let i = 0; i < n; i++) { rgb[3 * i] = img.data[4 * i]; rgb[3 * i + 1] = img.data[4 * i + 1]; rgb[3 * i + 2] = img.data[4 * i + 2]; }
+  const out = await st.pipe(new st.RawImage(rgb, img.width, img.height, 3));
+  const r = Array.isArray(out) ? out[0] : out;
+  let data, dw, dh;
+  if (r && r.predicted_depth) {
+    const pd = r.predicted_depth, dims = pd.dims;
+    dh = dims[dims.length - 2]; dw = dims[dims.length - 1];
+    data = pd.data instanceof Float32Array ? pd.data : (pd.type === 'float16' && pd.data instanceof Uint16Array) ? halfToFloat(pd.data) : Float32Array.from(pd.data);
+  } else if (r && r.depth) { const d = r.depth; dw = d.width; dh = d.height; data = Float32Array.from(d.data); }
+  else throw new Error('model returned no depth output');
+  let finite = 0; for (let i = 0; i < data.length; i += 7) if (Number.isFinite(data[i])) finite++;
+  if (!finite) throw new Error('depth output is all NaN/Inf (try dtype fp32)');
+  drawDepthInset(data, dw, dh);
+  st.runs = (st.runs || 0) + 1;
+  return { data, dw, dh };
+}
+function drawDepthInset(data, dw, dh) {
+  const s = Array.from({ length: 200 }, (_, i) => data[Math.floor(i * data.length / 200)]).filter(Number.isFinite).sort((a, b) => a - b);
+  const lo = s[Math.floor(s.length * 0.02)], hi = s[Math.floor(s.length * 0.98)] || lo + 1;
+  const cv = $('depthInset'); cv.width = dw; cv.height = dh;
+  const ctx = cv.getContext('2d'), im = ctx.createImageData(dw, dh);
+  for (let i = 0; i < data.length; i++) {
+    const t = Math.max(0, Math.min(1, (data[i] - lo) / (hi - lo || 1)));
+    // compact "turbo"-like ramp: blue -> cyan -> yellow -> red
+    im.data[4 * i] = 255 * Math.min(1, Math.max(0, 1.5 * t * 2 - 1)); im.data[4 * i + 1] = 255 * Math.max(0, 1 - Math.abs(2 * t - 1) * 1.1);
+    im.data[4 * i + 2] = 255 * Math.min(1, Math.max(0, 1.4 - 2.2 * t)); im.data[4 * i + 3] = 255;
+  }
+  ctx.putImageData(im, 0, 0);
+  $('depthWrap').style.display = 'block';
+  $('depthRange').textContent = `${lo.toPrecision(3)}…${hi.toPrecision(3)}`;
+}
 async function runDA3(kfId, img) {
   const st = S.da3; st.busy = true;
   const t0 = performance.now();
   try {
-    const n = img.width * img.height, rgb = new Uint8ClampedArray(3 * n);
-    for (let i = 0; i < n; i++) { rgb[3 * i] = img.data[4 * i]; rgb[3 * i + 1] = img.data[4 * i + 1]; rgb[3 * i + 2] = img.data[4 * i + 2]; }
-    const out = await st.pipe(new st.RawImage(rgb, img.width, img.height, 3));
-    const r = Array.isArray(out) ? out[0] : out;
-    let data, dw, dh;
-    if (r.predicted_depth) {
-      const pd = r.predicted_depth, dims = pd.dims;
-      dh = dims[dims.length - 2]; dw = dims[dims.length - 1];
-      data = pd.data instanceof Float32Array ? pd.data : (pd.type === 'float16' && pd.data instanceof Uint16Array) ? halfToFloat(pd.data) : Float32Array.from(pd.data);
-    } else { const d = r.depth; dw = d.width; dh = d.height; data = Float32Array.from(d.data); }
-    const res = S.est.addDepthMap(kfId, data, dw, dh);
-    const da = S.est.da3;
-    st.status = res && res.ok ? `${da.mode} · s=${da.scale.toPrecision(3)} · err ${(100 * da.err).toFixed(0)}%` : `aligning… (${res ? (res.n != null ? res.n + ' pts' : 'err ' + (100 * (res.err || 0)).toFixed(0) + '%') : 'kf gone'})`;
-  } catch (e) { st.status = 'error: ' + (e.message || e); }
-  st.ms = performance.now() - t0; st.busy = false;
+    const { data, dw, dh } = await inferDepth(img);
+    if (kfId == null) { st.status = 'running · waiting for tracking to align'; }
+    else {
+      const res = S.est.addDepthMap(kfId, data, dw, dh), da = S.est.da3;
+      if (res && res.ok) { st.aligned = (st.aligned || 0) + 1; st.status = `aligned: ${da.mode} · s=${da.scale.toPrecision(3)} · err ${(100 * da.err).toFixed(0)}%`; }
+      else st.status = !res ? 'keyframe left window before depth arrived'
+        : res.n != null ? `aligning: ${res.n}/8 triangulated landmarks in view — move sideways` : `rejected map: alignment err ${(100 * (res.err || 0)).toFixed(0)}%`;
+    }
+  } catch (e) { console.error('DA3 run failed', e); st.status = 'run error: ' + (e.message || e); }
+  st.ms = performance.now() - t0; st.busy = false; st.lastRun = performance.now();
 }
 
 // ------------------------------------------------------------------ export
@@ -1575,7 +1649,7 @@ $('ePly').addEventListener('click', () => {
 
 // ------------------------------------------------------------------ drawing helpers
 let C = {};
-function readColors() { const cs = getComputedStyle(document.documentElement); for (const k of ['text', 'muted', 'grid', 'traj', 'lm', 'pts', 'frustum', 'warn', 'accent', 'surface-2', 'bad']) C[k] = cs.getPropertyValue('--' + k).trim(); }
+function readColors() { const cs = getComputedStyle(document.documentElement); for (const k of ['text', 'muted', 'grid', 'traj', 'lm', 'da3', 'pts', 'frustum', 'warn', 'accent', 'surface-2', 'bad']) C[k] = cs.getPropertyValue('--' + k).trim(); }
 readColors();
 if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', readColors);
 function fitCanvas(cv) {
@@ -1589,7 +1663,8 @@ function drawView(tracks) {
   ctx.drawImage(video, 0, 0, w, h);
   const s = w / S.W, r = Math.max(2, 2.2 * (window.devicePixelRatio || 1));
   for (const q of tracks) {
-    ctx.fillStyle = S.est.isLandmark(q.id) ? C.lm : C.warn;
+    const f = S.est.feats.get(q.id);
+    ctx.fillStyle = f && f.lm ? (f.prior ? C.da3 : C.lm) : C.warn;
     ctx.beginPath(); ctx.arc(q.x * s, q.y * s, r, 0, 6.2832); ctx.fill();
   }
 }
@@ -1690,10 +1765,11 @@ const RO = [
   ['gyro bias (rad/s)', () => vec(S.est.kfs.length ? S.est.kfs[S.est.kfs.length - 1].bg : S.est.bias(), 3)],
   ['accel bias (m/s²)', () => S.est.kfs.length ? vec(S.est.kfs[S.est.kfs.length - 1].ba, 2) : '–'],
   ['FOV / td / offset', () => `${f2(SET.fov, 1)}° / ${SET.td} ms / ${SET.camOffset}°`],
-  ['DA3', () => S.da3.status + (S.da3.ms ? ` · ${f2(S.da3.ms, 0)}ms` : '')],
+  ['DA3', () => S.da3.status + (S.da3.ms ? ` · ${f2(S.da3.ms, 0)}ms` : ''), true],
+  ['DA3 in solver', () => { const n = S.est.da3Stats(); return `${n.withPrior} landmarks with prior · ${n.fromDA3} initialized by DA3 · ${S.da3.aligned || 0}/${S.da3.runs || 0} maps aligned`; }, true],
   ['last reset', () => S.lastReset || '–'],
 ];
-$('ro').innerHTML = RO.map(([k], i) => `<div class="ro"><b>${k}</b><span id="ro${i}">–</span></div>`).join('');
+$('ro').innerHTML = RO.map(([k, , wide], i) => `<div class="ro${wide ? ' wide' : ''}"><b>${k}</b><span id="ro${i}">–</span></div>`).join('');
 let lastCount = { t: performance.now(), imu: 0, frames: 0 };
 function updateReadouts() {
   const t = performance.now(), dt = (t - lastCount.t) / 1000;
