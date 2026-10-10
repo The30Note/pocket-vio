@@ -3,6 +3,7 @@
 Monocular visual-inertial odometry in one HTML file (`index.html`), aimed at Chrome on Android.
 
 - **One pipeline:** nothing records until *Start scan* (DA3 required). The first frame with enough features becomes keyframe 0 — still or moving, no special start mode. DA3 seeds landmark depths on every keyframe it keeps up with; each depth map carries one free scale solved in the sliding window together with poses, velocity, tilt and biases, so DA3 fixes the scene's shape and the IMU fixes its metric size.
+- **Capture → post-processing:** every scan records photos (every 0.3 m / 2 s, skipped while turning fast), the raw IMU stream and the phone poses. *Export → Session bundle (.zip)* and run `post/pvpost.py` on a desktop for metric poses (MapAnything + RoNIN inertial scale + optional COLMAP refinement). See [post/README.md](post/README.md).
 - **Run:** open https://raw.githack.com/The30Note/pocket-vio/main/index.html (or serve this folder over HTTPS) or `http://localhost`, open it on the phone and tap **Start**. Then hold the phone still for about 1 s.
 - **Calibrate:** tap **Calibrate** and rotate the phone in place for 5 s. This solves the camera rotation offset, the camera-IMU time offset and the FOV, and saves them to localStorage.
 - **First-time setup** (opens automatically, or via *Setup*): sensors test → install DA3 (cached) → DA3 benchmark at 280–504 px → camera calibration → IMU rest check → walk scale test. *Copy report* puts a JSON summary on the clipboard.

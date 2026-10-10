@@ -1,0 +1,7 @@
+numpy>=1.26
+scipy>=1.11
+pillow>=10
+pycolmap>=4.0        # --refine
+torch>=2.2           # --ronin (and MapAnything)
+# MapAnything (optional, recommended; needs a CUDA GPU with ~10+ GB for 32-view chunks):
+#   git clone https://github.com/facebookresearch/map-anything && pip install -e ./map-anything
