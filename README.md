@@ -2,6 +2,7 @@
 
 Monocular visual-inertial odometry in one HTML file (`index.html`), aimed at Chrome on Android.
 
+- **Scanning:** nothing records until *Start scan*; DA3 must be installed first. No need to hold still: if the phone and the image are both still it starts from rest, otherwise it starts while moving with a visual-inertial alignment (velocity, gravity and feature depths solved from ~1 s of frames).
 - **Run:** open https://raw.githack.com/The30Note/pocket-vio/main/index.html (or serve this folder over HTTPS) or `http://localhost`, open it on the phone and tap **Start**. Then hold the phone still for about 1 s.
 - **Calibrate:** tap **Calibrate** and rotate the phone in place for 5 s. This solves the camera rotation offset, the camera-IMU time offset and the FOV, and saves them to localStorage.
 - **First-time setup** (opens automatically, or via *Setup*): sensors test → install DA3 (cached) → DA3 benchmark at 280–504 px → camera calibration → IMU rest check → walk scale test. *Copy report* puts a JSON summary on the clipboard.

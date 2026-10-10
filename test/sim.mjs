@@ -82,12 +82,14 @@ function inv3(A) {
 }
 
 // ------------------------------------------------------------ VIO test
-function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, label = 'VIO' } = {}) {
+function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, label = 'VIO', scanAt = 0, initBgErr = null } = {}) {
   const R = rng(seed), tStatic = 2.0, mo = makeMotion(tStatic);
   const W = 270, H = 360, cam = makeCam(W, H, 65, 0);
   const bgT = [0.012, -0.018, 0.009], baT = [0.06, -0.08, 0.1];
   const est = new VIO.Estimator({ td });
   est.setCamera(cam);
+  if (initBgErr) est.p.initBg = add3(bgT, initBgErr); // gyro bias from an earlier rest check, slightly stale
+  let scanning = false;
   // landmarks on the walls of a room
   const LM = [];
   const box = [[-5, 5], [-5, 7], [-1.6, 2.4]];
@@ -114,7 +116,7 @@ function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, 
     return (q[0] < 10 || q[1] < 10 || q[0] > W - 10 || q[1] > H - 10) ? null : { q, Z: Xc[2] }; };
   const errLive = [], gtAt = t => ({ p: mo.pos(t), R: mo.rot(t) });
   let maxSolve = 0, sumSolve = 0, nKf = 0, kills = 0, resets = 0;
-  const startResets = est.resets;
+  const startResets = est.resets + 1; // + startScan
   for (let k = 0; k * (1 / 30) < seconds; k++) {
     const t = k / 30, tc = t - td; // camera clock lags IMU clock by td
     pushImuUntil(t + 0.02);
@@ -139,7 +141,14 @@ function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, 
       if (a.bad) { a.off[0] += a.bad[0]; a.off[1] += a.bad[1]; }
       tracks.push({ id: a.id, x: q[0] + R.n() * 0.5 + a.off[0], y: q[1] + R.n() * 0.5 + a.off[1], li });
     }
+    if (!scanning && t >= scanAt) { est.startScan(); scanning = true; }
     const out = est.addFrame(tc, tracks);
+    if (out.kf && est.status === 'tracking' && !est._logged) { est._logged = true;
+      const k0 = est.kfs[0], vt = mo.vel(k0.t), Rt = mo.rot(k0.t);
+      const tilt = Math.acos(Math.min(1, VIO.dot3(mtv(k0.R, [0, 0, 1]), mtv(Rt, [0, 0, 1])))) * 180 / Math.PI;
+      // velocity in body frame (yaw-free comparison)
+      console.log(`  init ${est.initMode} at t=${k0.t.toFixed(2)} kfs=${est.kfs.length} align=${JSON.stringify(est.alignInfo)} |v|true=${norm3(vt).toFixed(3)} vBody est=[${mtv(k0.R, k0.v).map(v => v.toFixed(2))}] true=[${mtv(Rt, vt).map(v => v.toFixed(2))}] tiltErr=${tilt.toFixed(2)}°`);
+    }
     if (out.reset) { resets++; console.log(`  reset at t=${t.toFixed(2)}: ${out.reset}`); }
     if (out.kill.length) { kills += out.kill.length; const ks = new Set(out.kill); for (const [li, a] of active) if (ks.has(a.id)) active.delete(li); }
     if (out.kf && est.status === 'tracking') {
@@ -166,20 +175,25 @@ function testVIO({ seconds = 30, seed = 1, da3 = false, metricBias = 1, td = 0, 
   const ateRaw = rms(E.map((e, i) => norm3(sub3(e, G[i]))));
   const al = umeyama(E, G);
   const ateSim3 = rms(E.map((e, i) => norm3(sub3(add3(scl3(mv(al.R, e), al.s), al.t), G[i]))));
+  // rigid (scale-free) alignment: the honest error measure when a scan starts mid-motion
+  const mE = scl3(E.reduce((a, b) => add3(a, b), [0, 0, 0]), 1 / E.length), mG = scl3(G.reduce((a, b) => add3(a, b), [0, 0, 0]), 1 / G.length);
+  const tR = sub3(mG, mv(al.R, mE));
+  const ateSE3 = rms(E.map((e, i) => norm3(sub3(add3(mv(al.R, e), tR), G[i]))));
   let pathGT = 0; for (let i = 1; i < G.length; i++) pathGT += norm3(sub3(G[i], G[i - 1]));
   const yawErr = Math.abs(logSO3(mtm(traj[traj.length - 1].R, gtAt(traj[traj.length - 1].t).R)).reduce((s, x) => s + x * x, 0)) ** 0.5 * 180 / Math.PI;
   const kfLast = est.kfs[est.kfs.length - 1] || { bg: [NaN, NaN, NaN], ba: [NaN, NaN, NaN] };
   console.log(`  ${label}: ${seconds}s, KFs=${traj.length}, path(GT)=${pathGT.toFixed(2)} m, landmarks(window)=${est.nLm}, mapPts=${est.mapPts.length}, kills=${kills}`);
   console.log(`  solve: mean ${(sumSolve / Math.max(1, nKf)).toFixed(1)} ms, max ${maxSolve.toFixed(1)} ms, LM iters(last)=${est.lastIters}`);
-  console.log(`  scale(sim3)=${al.s.toFixed(4)}  ATE raw=${ateRaw.toFixed(3)} m  ATE sim3=${ateSim3.toFixed(3)} m  final pos err=${norm3(sub3(E[E.length - 1], G[G.length - 1])).toFixed(3)} m  final rot err=${yawErr.toFixed(2)}°`);
+  console.log(`  scale(sim3)=${al.s.toFixed(4)}  ATE raw=${ateRaw.toFixed(3)} m  ATE sim3=${ateSim3.toFixed(3)} m  ATE se3=${ateSE3.toFixed(3)} m  final pos err=${norm3(sub3(E[E.length - 1], G[G.length - 1])).toFixed(3)} m  final rot err=${yawErr.toFixed(2)}°`);
   console.log(`  live (IMU-propagated) error: rms ${rms(errLive).toFixed(3)} m, max ${Math.max(...errLive).toFixed(3)} m`);
   console.log(`  bias est bg=[${kfLast.bg.map(v => v.toFixed(4))}] true≈[${bgD.map(v => v.toFixed(4))}]  ba=[${kfLast.ba.map(v => v.toFixed(3))}] true≈[${baD.map(v => v.toFixed(3))}]`);
   if (da3) console.log(`  DA3 prior: mode=${est.da3.mode} scale=${est.da3.scale.toFixed(3)} relErr=${est.da3.err.toFixed(3)} maps=${est.da3.maps} VIO/DA3=${est.da3.vioRatio}`);
   check(`${label} no resets`, resets === 0 && est.resets === startResets, `resets=${resets}`);
   if (metricBias === 1) check(`${label} metric scale ≈ 1`, Math.abs(al.s - 1) < 0.05, `scale=${al.s.toFixed(4)}`);
   else console.log(`  INFO  ${label}: DA3 metric bias ×${metricBias} -> trajectory scale ${(1 / al.s).toFixed(4)} (1 = unaffected)`);
-  check(`${label} trajectory error small`, ateRaw < Math.max(0.1, 0.03 * pathGT), `ATE raw=${ateRaw.toFixed(3)} m over ${pathGT.toFixed(1)} m (${(100 * ateRaw / pathGT).toFixed(2)}%)`);
-  if (da3 === true) check(`${label} depth mode detected`, est.da3.mode === 'inverse depth', est.da3.mode);
+  const ate = scanAt > 0 ? ateSE3 : ateRaw, ateName = scanAt > 0 ? 'ATE (rigid-aligned)' : 'ATE raw';
+  check(`${label} trajectory error small`, ate < Math.max(0.1, 0.03 * pathGT), `${ateName}=${ate.toFixed(3)} m over ${pathGT.toFixed(1)} m (${(100 * ate / pathGT).toFixed(2)}%)`);
+  if (da3 === true && scanAt === 0) check(`${label} depth mode detected`, est.da3.mode === 'inverse depth', est.da3.mode);
 }
 
 // ------------------------------------------------------ calibration test
@@ -205,11 +219,19 @@ function testCalib() {
 }
 
 const run = n => which.length === 0 || which.includes(n);
+if (which.includes('sweep')) { // moving starts with DA3 relative, several seeds / start times
+  for (const [seed, at] of [[8, 4], [9, 7.5], [10, 10], [11, 12.5], [12, 15], [13, 5.5]])
+    testVIO({ seconds: at + 14, seed, scanAt: at, da3: true, initBgErr: [0.002, -0.003, 0.002], label: `sweep seed${seed} start@${at}s` });
+}
 if (run('klt')) testKLT();
 if (run('calib')) testCalib();
 if (run('vio')) testVIO({ seconds: opt('seconds', 30), seed: opt('seed', 1) });
 if (run('td')) testVIO({ seconds: 20, seed: 2, td: 0.025, label: 'VIO (td=25ms)' });
 if (run('da3')) testVIO({ seconds: 20, seed: 4, da3: true, label: 'VIO + DA3 prior' });
+if (run('moving')) testVIO({ seconds: 30, seed: 5, scanAt: 8, initBgErr: [0.003, -0.002, 0.002], label: 'VIO started while moving' });
+if (run('moving7')) testVIO({ seconds: 25, seed: 7, scanAt: 6, initBgErr: [0.002, 0.002, -0.003], label: 'seed7 no DA3' });
+if (run('movingda3')) testVIO({ seconds: 25, seed: 7, scanAt: 6, da3: true, initBgErr: [0.002, 0.002, -0.003], label: 'VIO + DA3 started while moving' });
+if (run('moving2')) testVIO({ seconds: 30, seed: 6, scanAt: 13.5, initBgErr: [-0.002, 0.003, 0.001], label: 'VIO started while moving (2)' });
 if (run('metric')) testVIO({ seconds: 20, seed: 4, da3: 'metric', label: 'VIO + DA3 metric' });
 if (run('monitor')) testVIO({ seconds: 20, seed: 4, da3: 'monitor', metricBias: 1.1, label: 'VIO + DA3 metric-monitor (10% biased)' });
 if (run('metricbias')) testVIO({ seconds: 20, seed: 4, da3: 'metric', metricBias: 1.1, label: 'VIO + DA3 metric (10% biased)' });
